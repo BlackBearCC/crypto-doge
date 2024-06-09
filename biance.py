@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 import ccxt.pro
 import numpy as np
@@ -39,7 +40,7 @@ import backtrader as bt
 #     'countries': ['CN'],
 # })
 def fetch_data(symbol, timeframe, limit):
-    exchange = ccxt.okx({
+    exchange = ccxt.binance({
         'enableRateLimit': True,
     })
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -48,26 +49,38 @@ def fetch_data(symbol, timeframe, limit):
     df.set_index('timestamp', inplace=True)
     return df
 
-# 定义继承自PandasData的自定义类
-class MyOKXPandasData(PandasData):
-    params = (
-        ('datetime', None),  # 使用timestamp作为时间戳列，注意它已被设置为索引
-        ('open', 'open'),
-        ('high', 'high'),
-        ('low', 'low'),
-        ('close', 'close'),
-        ('volume', 'volume'),
-        ('openinterest', -1),  # 如果没有未平仓兴趣数据，设置为-1
-    )
+# 读取CSV文件并预处理数据
+def read_csv_data(file_path):
+    df = pd.read_csv(file_path)
+    df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
+    df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+    df.set_index('timestamp', inplace=True)
+    return df
 
+def read_and_combine_csv(directory):
+    data_folder = Path(directory)
+    all_files = data_folder.glob('*.csv')
+    df_list = []
+
+    for file_path in all_files:
+        df = pd.read_csv(file_path)
+        df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
+        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        df.set_index('timestamp', inplace=True)
+        df_list.append(df)
+
+    # Combine all data frames into a single data frame
+    combined_df = pd.concat(df_list)
+    combined_df.sort_index(inplace=True)  # Make sure the index is sorted
+    return combined_df
 
 
 class MultiTimeFrameRSIStrategy(bt.Strategy):
     params = (
         ('rsi_window', 14),
         ('buy_threshold', 30),
-        ('sell_threshold', 70),
-        ('cooldown_period', 10),
+        ('sell_threshold', 72),
+        ('cooldown_period', 120),
     )
 
     def __init__(self):
@@ -93,7 +106,7 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
             self.rsi_15m < self.params.buy_threshold and
             self.rsi_30m < self.params.buy_threshold and
             self.buy_cooldown == 0):
-            self.buy()
+            self.buy(size=100, name="Buy")
             self.buy_cooldown = self.params.cooldown_period
             self.log('BUY CREATE, %.2f' % self.datas[0].close[0])
 
@@ -102,9 +115,11 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
               self.rsi_15m > self.params.sell_threshold and
               self.rsi_30m > self.params.sell_threshold and
               self.sell_cooldown == 0):
-            self.sell()
+            self.sell(size=100, name="Sell")
             self.sell_cooldown = self.params.cooldown_period
             self.log('SELL CREATE, %.2f' % self.datas[0].close[0])
+
+
 
     def log(self, txt, dt=None):
         dt = dt or self.datas[0].datetime.datetime(0)  # Get the datetime
@@ -117,30 +132,81 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
 
         print('%s, %s' % (dt.isoformat(), txt))
 
+import backtrader.analyzers as btanalyzers
 if __name__ == '__main__':
     cerebro = bt.Cerebro()
 
-    # 为不同的时间帧添加数据
-    timeframes = ['5m', '15m', '30m']
-    data_feeds = []
-    for i, tf in enumerate(timeframes):
-        ohlcv_df = fetch_data('BNB/USDT', tf, 500)
-        data = bt.feeds.PandasData(dataname=ohlcv_df)
-        if tf == '5m':
-            data.plotinfo.plot = True  # 只有5分钟数据显示在主图
+    # 指定存放CSV文件的目录
+    directories = {
+        '5m': 'WIFUSDT-5m',
+        '15m': 'WIFUSDT-15m',
+        '30m': 'WIFUSDT-30m'
+    }
+
+    for timeframe, dir_path in directories.items():
+        combined_df = read_and_combine_csv(dir_path)
+        data = bt.feeds.PandasData(dataname=combined_df)
+        if timeframe == '5m':
+            data.plotinfo.plot = True  # Only the 5-minute data is plotted on the main plot
         else:
-            data.plotinfo.plot = False  # 其他时间帧不显示或显示在子图
+            data.plotinfo.plot = False  # Other timeframes are either not plotted or on subplots
             data.plotinfo.subplot = True
-        data_feeds.append(data)
         cerebro.adddata(data)
 
+    cerebro.broker.setcash(5000)  # 初始资金设为5000
+    # 添加您的数据和策略
     cerebro.addstrategy(MultiTimeFrameRSIStrategy)
-    cerebro.broker.setcash(100000.0)
+
+    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name='sharpe_ratio')
+    cerebro.addanalyzer(btanalyzers.DrawDown, _name='drawdown')
+    cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name='trade_analyzer')
+
 
     # 运行策略
-    cerebro.run()
+    results = cerebro.run()
+    strat = results[0]
 
-    cerebro.plot(style='candlestick', barup='green', bardown='red', figsize=(30, 20), dpi=300)
+
+    print('夏普比率:', strat.analyzers.sharpe_ratio.get_analysis())
+    print('最大回撤:', strat.analyzers.drawdown.get_analysis()['max']['drawdown'])
+    trade_analysis = strat.analyzers.trade_analyzer.get_analysis()
+    print('总交易数:', trade_analysis)
+
+
+    # 设置图形参数并绘图
+    import matplotlib.pyplot as plt
+
+    plt.rcParams['path.simplify'] = True
+    plt.rcParams['path.simplify_threshold'] = 1.0
+    plt.rcParams['agg.path.chunksize'] = 5000
+    cerebro.plot(style='candlestick', barup='black', bardown='white', marker='o', markersize=4, markercolor='orange')
+#
+# if __name__ == '__main__':
+#     cerebro = bt.Cerebro()
+#
+#     # 为不同的时间帧添加数据
+#     timeframes = ['5m', '15m', '30m']
+#     data_feeds = []
+#     for i, tf in enumerate(timeframes):
+#         ohlcv_df = fetch_data('BNB/USDT', tf, 500)
+#         data = bt.feeds.PandasData(dataname=ohlcv_df)
+#         if tf == '5m':
+#             data.plotinfo.plot = True  # 只有5分钟数据显示在主图
+#         else:
+#             data.plotinfo.plot = False  # 其他时间帧不显示或显示在子图
+#             data.plotinfo.subplot = True
+#         data_feeds.append(data)
+#         cerebro.adddata(data)
+#
+#     cerebro.addstrategy(MultiTimeFrameRSIStrategy)
+#     cerebro.broker.setcash(100000.0)
+#
+#     # 运行策略
+#     cerebro.run()
+#     plt.rcParams['path.simplify'] = True
+#     plt.rcParams['path.simplify_threshold'] = 1.0
+#     plt.rcParams['agg.path.chunksize'] = 10000
+#     cerebro.plot(style='candlestick', barup='black', bardown='white', marker='o', markersize=4, markercolor='orange')
 
 #
 # def calculate_rsi(data, window=14):
