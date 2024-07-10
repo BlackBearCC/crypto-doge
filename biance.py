@@ -49,6 +49,8 @@ def fetch_data(symbol, timeframe, limit):
     df.set_index('timestamp', inplace=True)
     return df
 
+
+
 # 读取CSV文件并预处理数据
 def read_csv_data(file_path):
     df = pd.read_csv(file_path)
