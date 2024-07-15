@@ -82,8 +82,8 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
     params = (
         ('rsi_window', 14),
         ('buy_threshold', 22),
-        ('sell_threshold', 60),
-        ('cooldown_period', 20),
+        ('sell_threshold', 65),
+        ('cooldown_period', 10),
     )
 
     def __init__(self):
@@ -113,6 +113,7 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         if (self.rsi_5m < self.params.buy_threshold and
             self.rsi_15m < self.params.buy_threshold and
             self.rsi_30m < self.params.buy_threshold and
+            rsi_average < self.params.buy_threshold and
             self.buy_cooldown == 0):
             if self.position.size < 0:
                 self.close()
@@ -124,6 +125,7 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         elif (self.rsi_5m > self.params.sell_threshold and
               self.rsi_15m > self.params.sell_threshold and
               self.rsi_30m > self.params.sell_threshold and
+              rsi_average > self.params.sell_threshold and
               self.sell_cooldown == 0):
             if self.position.size>0:
                 self.close()
