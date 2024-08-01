@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import ccxt.pro
+import joblib
 import numpy as np
 import pytz
 from backtrader import Cerebro, TimeFrame
@@ -78,16 +79,77 @@ def read_and_combine_csv(directory):
     return combined_df
 
 
+import pandas as pd
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange
+from ta.trend import SMAIndicator
+
+
+# # 读取CSV文件并预处理数据
+# def read_and_prepare_data(directory):
+#     data_folder = Path(directory)
+#     all_files = data_folder.glob('*.csv')
+#     df_list = []
+#
+#     for file_path in all_files:
+#         df = pd.read_csv(file_path)
+#         df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
+#         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+#         df.set_index('timestamp', inplace=True)
+#         df_list.append(df)
+#
+#     combined_df = pd.concat(df_list)
+#     combined_df.sort_index(inplace=True)
+#
+#     # 计算技术指标
+#     combined_df['RSI'] = RSIIndicator(combined_df['close']).rsi()
+#     combined_df['ATR'] = AverageTrueRange(combined_df['high'], combined_df['low'],
+#                                           combined_df['close']).average_true_range()
+#     combined_df['SMA'] = SMAIndicator(combined_df['close'], window=100).sma_indicator()
+#
+#     # 创建标签：未来1小时的价格变化
+#     combined_df['Price_Change'] = combined_df['close'].shift(-1) - combined_df['close']
+#
+#     # 删除缺失值
+#     combined_df.dropna(inplace=True)
+#
+#     return combined_df
+#
+#
+# data = read_and_prepare_data('WIFUSDT-15m')
+#
+# from sklearn.model_selection import train_test_split
+# from sklearn.linear_model import LinearRegression
+# from sklearn.metrics import mean_squared_error
+#
+# # 准备特征和标签
+# X = data[['RSI', 'ATR', 'SMA']]
+# y = data['Price_Change']
+#
+# # 分割数据集
+# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+#
+# # 训练模型
+# model = LinearRegression()
+# model.fit(X_train, y_train)
+#
+# # 评估模型
+# y_pred = model.predict(X_test)
+# mse = mean_squared_error(y_test, y_pred)
+# print(f'Mean Squared Error: {mse}')
+# # 保存模型
+# joblib.dump(model, 'rsi_atr_sma_model.pkl')
+
 # 定义多时间框架RSI策略
 class MultiTimeFrameRSIStrategy(bt.Strategy):
     params = (
         ('rsi1_length', 14),
         ('rsi2_length', 14),
         ('rsi3_length', 14),
-        ('bull_market_buy_threshold', 30.0),
-        ('bull_market_sell_threshold', 70.0),
-        ('bear_market_buy_threshold', 25.0),
-        ('bear_market_sell_threshold', 65.0),
+        # ('bull_market_buy_threshold', 30.0),
+        # ('bull_market_sell_threshold', 70.0),
+        # ('bear_market_buy_threshold', 25.0),
+        # ('bear_market_sell_threshold', 65.0),
         ('atr_multiplier', 16),
         ('atr_length', 14),
         ('cooldown_period', 15),
@@ -107,6 +169,9 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
 
         # 定义SMA
         self.long_term_ma = bt.indicators.SMA(self.datas[0].close, period=100)
+
+        # 加载训练好的模型
+        self.model = joblib.load('rsi_atr_sma_model.pkl')
 
         # 冷却计数器
         self.buy_cooldown = 0
@@ -136,11 +201,21 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         size = self.params.position_size/current_price
         rsi_average = (self.rsi_5m[0] + self.rsi_15m[0] + self.rsi_30m[0]) / 3
 
-        is_bull_market = self.datas[0].close[0] > self.long_term_ma[0]
-        buy_threshold = self.params.bull_market_buy_threshold if is_bull_market else self.params.bear_market_buy_threshold
-        sell_threshold = self.params.bull_market_sell_threshold if is_bull_market else self.params.bear_market_sell_threshold
+        # is_bull_market = self.datas[0].close[0] > self.long_term_ma[0]
+        # buy_threshold = self.params.bull_market_buy_threshold if is_bull_market else self.params.bear_market_buy_threshold
+        # sell_threshold = self.params.bull_market_sell_threshold if is_bull_market else self.params.bear_market_sell_threshold
 
         atr_value = self.atr[0]
+        sma_value = self.long_term_ma[0]
+
+        # 使用带有特征名称的DataFrame进行预测
+        feature_names = ['RSI', 'ATR', 'SMA']
+        input_data = pd.DataFrame([[rsi_average, atr_value, sma_value]], columns=feature_names)
+        predicted_change = self.model.predict(input_data)[0]
+        # self.log(f'动态阈值预测: {predicted_change}')
+        # 动态调整阈值
+        buy_threshold = 30 if predicted_change > 0 else 25
+        sell_threshold = 70 if predicted_change < 0 else 65
 
         if (self.rsi_5m[0] < buy_threshold and self.rsi_15m[0] < buy_threshold and self.rsi_30m[0] < buy_threshold and
                 rsi_average < buy_threshold and self.buy_cooldown == 0):
