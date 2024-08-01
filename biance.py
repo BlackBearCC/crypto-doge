@@ -78,74 +78,104 @@ def read_and_combine_csv(directory):
     return combined_df
 
 
+# 定义多时间框架RSI策略
 class MultiTimeFrameRSIStrategy(bt.Strategy):
     params = (
-        ('rsi_window', 14),
-        ('buy_threshold', 22),
-        ('sell_threshold', 65),
-        ('cooldown_period', 10),
+        ('rsi1_length', 14),
+        ('rsi2_length', 14),
+        ('rsi3_length', 14),
+        ('bull_market_buy_threshold', 30.0),
+        ('bull_market_sell_threshold', 70.0),
+        ('bear_market_buy_threshold', 25.0),
+        ('bear_market_sell_threshold', 65.0),
+        ('atr_multiplier', 16),
+        ('atr_length', 14),
+        ('cooldown_period', 15),
+        ('initial_cash', 5000),
+        ('commission', 0.1),
+        ('position_size',200),
     )
 
     def __init__(self):
-        # 初始化每个时间帧数据的RSI指标
-        self.rsi_5m = bt.indicators.RSI(self.datas[0].close, period=self.params.rsi_window)
-        self.rsi_15m = bt.indicators.RSI(self.datas[1].close, period=self.params.rsi_window)
-        self.rsi_30m = bt.indicators.RSI(self.datas[2].close, period=self.params.rsi_window)
+        # 定义RSI指标
+        self.rsi_5m = bt.indicators.RSI(self.datas[0].close, period=self.params.rsi1_length)
+        self.rsi_15m = bt.indicators.RSI(self.datas[1].close, period=self.params.rsi2_length)
+        self.rsi_30m = bt.indicators.RSI(self.datas[2].close, period=self.params.rsi3_length)
 
-        # 用于防止重复交易的计时器
+        # 定义ATR指标
+        self.atr = bt.indicators.ATR(self.datas[0], period=self.params.atr_length)
+
+        # 定义SMA
+        self.long_term_ma = bt.indicators.SMA(self.datas[0].close, period=100)
+
+        # 冷却计数器
         self.buy_cooldown = 0
         self.sell_cooldown = 0
 
+        # 用于记录绩效指标
+        self.trade_info = {
+            '总交易数': 0,
+            '胜率': 0,
+            '净利润': 0,
+            '最大回撤': 0,
+        }
+
+    def log(self, txt, dt=None):
+        dt = dt or self.datas[0].datetime.datetime(0)
+        dt = pd.Timestamp(dt).tz_localize('UTC').tz_convert('Asia/Shanghai')
+        formatted_dt = dt.strftime('%Y-%m-%d %H:%M:%S')
+        print('%s, %s' % (formatted_dt, txt))
+
     def next(self):
-        # 处理买入冷却期
         if self.buy_cooldown > 0:
             self.buy_cooldown -= 1
-        # 处理卖出冷却期
         if self.sell_cooldown > 0:
             self.sell_cooldown -= 1
 
-        amount_to_invest = 100
         current_price = self.datas[0].close[0]
-        size = amount_to_invest / current_price
+        size = self.params.position_size/current_price
         rsi_average = (self.rsi_5m[0] + self.rsi_15m[0] + self.rsi_30m[0]) / 3
 
-        # 检查所有RSI指标是否低于买入阈值
-        if (self.rsi_5m < self.params.buy_threshold and
-            self.rsi_15m < self.params.buy_threshold and
-            self.rsi_30m < self.params.buy_threshold and
-            rsi_average < self.params.buy_threshold and
-            self.buy_cooldown == 0):
+        is_bull_market = self.datas[0].close[0] > self.long_term_ma[0]
+        buy_threshold = self.params.bull_market_buy_threshold if is_bull_market else self.params.bear_market_buy_threshold
+        sell_threshold = self.params.bull_market_sell_threshold if is_bull_market else self.params.bear_market_sell_threshold
+
+        atr_value = self.atr[0]
+
+        if (self.rsi_5m[0] < buy_threshold and self.rsi_15m[0] < buy_threshold and self.rsi_30m[0] < buy_threshold and
+                rsi_average < buy_threshold and self.buy_cooldown == 0):
             if self.position.size < 0:
                 self.close()
             self.buy(size=size)
             self.buy_cooldown = self.params.cooldown_period
-            self.log('BUY , %.2f, SIZE: %.2f' % (self.datas[0].close[0], size))
+            stop_price = current_price - atr_value * self.params.atr_multiplier
+            take_profit_price = current_price + atr_value * self.params.atr_multiplier
+            self.sell(exectype=bt.Order.Stop, price=stop_price)
+            self.sell(exectype=bt.Order.Limit, price=take_profit_price)
+            self.log(
+                f'BUY , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f}')
 
-        # 检查所有RSI指标是否高于卖出阈值
-        elif (self.rsi_5m > self.params.sell_threshold and
-              self.rsi_15m > self.params.sell_threshold and
-              self.rsi_30m > self.params.sell_threshold and
-              rsi_average > self.params.sell_threshold and
-              self.sell_cooldown == 0):
-            if self.position.size>0:
+        elif (self.rsi_5m[0] > sell_threshold and self.rsi_15m[0] > sell_threshold and self.rsi_30m[
+            0] > sell_threshold and
+              rsi_average > sell_threshold and self.sell_cooldown == 0):
+            if self.position.size > 0:
                 self.close()
             self.sell(size=size)
             self.sell_cooldown = self.params.cooldown_period
-            self.log('SELL , %.2f, SIZE: %.2f' % (self.datas[0].close[0], size))
+            stop_price = current_price + atr_value * self.params.atr_multiplier
+            take_profit_price = current_price - atr_value * self.params.atr_multiplier
+            self.buy(exectype=bt.Order.Stop, price=stop_price)
+            self.buy(exectype=bt.Order.Limit, price=take_profit_price)
+            self.log(
+                f'SELL , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f}')
 
-
-
-    def log(self, txt, dt=None):
-        dt = dt or self.datas[0].datetime.datetime(0)  # Get the datetime
-        if isinstance(dt, float):  # Backtrader stores datetimes as floats internally
-            dt = bt.num2date(dt)  # Convert to datetime object
-
-        # # Convert UTC to China time (UTC+8)
-        # china_tz = pytz.timezone('Asia/Shanghai')
-        # dt = dt.replace(tzinfo=pytz.utc).astimezone(china_tz)
-        dt = pd.Timestamp(dt).tz_localize('UTC').tz_convert('Asia/Shanghai')
-        formatted_dt = dt.strftime('%Y-%m-%d %H:%M:%S')
-        print('%s, %s' % (formatted_dt, txt))
+    def stop(self):
+        # 输出绩效指标
+        self.trade_info['总交易数'] = self.analyzers.trade_analyzer.get_analysis().total.closed
+        self.trade_info['胜率'] = self.analyzers.trade_analyzer.get_analysis().won.total / self.trade_info['总交易数']
+        self.trade_info['净利润'] = self.broker.getvalue() - self.params.initial_cash
+        self.trade_info['最大回撤'] = self.analyzers.drawdown.get_analysis().max.moneydown
+        print(f"策略绩效指标:\n{self.trade_info}")
 
 import backtrader.analyzers as btanalyzers
 if __name__ == '__main__':
@@ -163,7 +193,7 @@ if __name__ == '__main__':
         data = bt.feeds.PandasData(dataname=combined_df)
         # 设置时间范围
         todate = datetime.datetime.now()
-        fromdate = todate - datetime.timedelta(days=30)
+        fromdate = todate - datetime.timedelta(days=60)
 
         data = bt.feeds.PandasData(dataname=combined_df, fromdate=fromdate, todate=todate)
         # data = bt.feeds.PandasData(dataname=combined_df)
@@ -239,7 +269,7 @@ if __name__ == '__main__':
     plt.rcParams['path.simplify'] = True
     plt.rcParams['path.simplify_threshold'] = 1.0
     plt.rcParams['agg.path.chunksize'] = 5000
-    cerebro.plot(style='candlestick', barup='black', bardown='white', marker='o', markersize=4, markercolor='orange')
+    # cerebro.plot(style='candlestick', barup='black', bardown='white', marker='o', markersize=4, markercolor='orange')
 #
 # if __name__ == '__main__':
 #     cerebro = bt.Cerebro()
