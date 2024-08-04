@@ -79,66 +79,22 @@ def read_and_combine_csv(directory):
     return combined_df
 
 
-import pandas as pd
-from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
-from ta.trend import SMAIndicator
 
 
-# # 读取CSV文件并预处理数据
-# def read_and_prepare_data(directory):
-#     data_folder = Path(directory)
-#     all_files = data_folder.glob('*.csv')
-#     df_list = []
-#
-#     for file_path in all_files:
-#         df = pd.read_csv(file_path)
-#         df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
-#         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-#         df.set_index('timestamp', inplace=True)
-#         df_list.append(df)
-#
-#     combined_df = pd.concat(df_list)
-#     combined_df.sort_index(inplace=True)
-#
-#     # 计算技术指标
-#     combined_df['RSI'] = RSIIndicator(combined_df['close']).rsi()
-#     combined_df['ATR'] = AverageTrueRange(combined_df['high'], combined_df['low'],
-#                                           combined_df['close']).average_true_range()
-#     combined_df['SMA'] = SMAIndicator(combined_df['close'], window=100).sma_indicator()
-#
-#     # 创建标签：未来1小时的价格变化
-#     combined_df['Price_Change'] = combined_df['close'].shift(-1) - combined_df['close']
-#
-#     # 删除缺失值
-#     combined_df.dropna(inplace=True)
-#
-#     return combined_df
-#
-#
-# data = read_and_prepare_data('WIFUSDT-15m')
-#
-# from sklearn.model_selection import train_test_split
-# from sklearn.linear_model import LinearRegression
-# from sklearn.metrics import mean_squared_error
-#
-# # 准备特征和标签
-# X = data[['RSI', 'ATR', 'SMA']]
-# y = data['Price_Change']
-#
-# # 分割数据集
-# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-#
-# # 训练模型
-# model = LinearRegression()
-# model.fit(X_train, y_train)
-#
-# # 评估模型
-# y_pred = model.predict(X_test)
-# mse = mean_squared_error(y_test, y_pred)
-# print(f'Mean Squared Error: {mse}')
-# # 保存模型
-# joblib.dump(model, 'rsi_atr_sma_model.pkl')
+# 归一化函数
+def normalize(predicted_change, min_value, max_value):
+    normalized_value = 2 * (predicted_change - min_value) / (max_value - min_value) - 1
+    return normalized_value
+
+# 动态阈值函数
+def dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold, min_value, max_value):
+    normalized_predicted_change = normalize(predicted_change, min_value, max_value)
+    adjustment_factor = 50  # 调整因子，可以根据需要调整
+
+    buy_threshold = base_buy_threshold + adjustment_factor * normalized_predicted_change
+    sell_threshold = base_sell_threshold + adjustment_factor * normalized_predicted_change
+
+    return buy_threshold, sell_threshold
 
 # 定义多时间框架RSI策略
 class MultiTimeFrameRSIStrategy(bt.Strategy):
@@ -146,44 +102,43 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         ('rsi1_length', 14),
         ('rsi2_length', 14),
         ('rsi3_length', 14),
-        # ('bull_market_buy_threshold', 30.0),
-        # ('bull_market_sell_threshold', 70.0),
-        # ('bear_market_buy_threshold', 25.0),
-        # ('bear_market_sell_threshold', 65.0),
+        ('base_buy_threshold', 30.0),
+        ('base_sell_threshold', 70.0),
         ('atr_multiplier', 16),
         ('atr_length', 14),
         ('cooldown_period', 15),
-        ('initial_cash', 5000),
+        ('initial_cash', 10000),
         ('commission', 0.1),
-        ('position_size',200),
+        ('position_size', 500),
+        ('min_predicted_change', -2000),
+        ('max_predicted_change', 2000),
     )
 
     def __init__(self):
-        # 定义RSI指标
         self.rsi_5m = bt.indicators.RSI(self.datas[0].close, period=self.params.rsi1_length)
         self.rsi_15m = bt.indicators.RSI(self.datas[1].close, period=self.params.rsi2_length)
         self.rsi_30m = bt.indicators.RSI(self.datas[2].close, period=self.params.rsi3_length)
-
-        # 定义ATR指标
         self.atr = bt.indicators.ATR(self.datas[0], period=self.params.atr_length)
-
-        # 定义SMA
         self.long_term_ma = bt.indicators.SMA(self.datas[0].close, period=100)
 
-        # 加载训练好的模型
-        self.model = joblib.load('rsi_atr_sma_model.pkl')
+        self.bollinger = bt.indicators.BollingerBands(self.datas[0].close, period=20)
+        self.ema = bt.indicators.EMA(self.datas[0].close, period=20)
+        self.macd = bt.indicators.MACDHisto(self.datas[0].close)
+        self.stochastic = bt.indicators.Stochastic(self.datas[0], period=14)
 
-        # 冷却计数器
+        self.model = joblib.load('ensemble_model.pkl')
+
         self.buy_cooldown = 0
         self.sell_cooldown = 0
 
-        # 用于记录绩效指标
         self.trade_info = {
             '总交易数': 0,
             '胜率': 0,
             '净利润': 0,
             '最大回撤': 0,
         }
+
+        self.predicted_price_line = self.datas[0].close * 0  # 初始化一个与close数据长度相同的0数组
 
     def log(self, txt, dt=None):
         dt = dt or self.datas[0].datetime.datetime(0)
@@ -198,24 +153,29 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
             self.sell_cooldown -= 1
 
         current_price = self.datas[0].close[0]
-        size = self.params.position_size/current_price
+        size = self.params.position_size / current_price
         rsi_average = (self.rsi_5m[0] + self.rsi_15m[0] + self.rsi_30m[0]) / 3
-
-        # is_bull_market = self.datas[0].close[0] > self.long_term_ma[0]
-        # buy_threshold = self.params.bull_market_buy_threshold if is_bull_market else self.params.bear_market_buy_threshold
-        # sell_threshold = self.params.bull_market_sell_threshold if is_bull_market else self.params.bear_market_sell_threshold
 
         atr_value = self.atr[0]
         sma_value = self.long_term_ma[0]
 
-        # 使用带有特征名称的DataFrame进行预测
-        feature_names = ['RSI', 'ATR', 'SMA']
-        input_data = pd.DataFrame([[rsi_average, atr_value, sma_value]], columns=feature_names)
+        bollinger_high = self.bollinger.lines.top[0]
+        bollinger_low = self.bollinger.lines.bot[0]
+        ema_value = self.ema[0]
+        macd_value = self.macd.macd[0]
+        stochastic_value = self.stochastic.percK[0]
+
+        feature_names = ['RSI', 'ATR', 'SMA', 'EMA', 'MACD', 'Stochastic', 'Bollinger_High', 'Bollinger_Low']
+        input_data = pd.DataFrame([[rsi_average, atr_value, sma_value, bollinger_high, bollinger_low, ema_value, macd_value, stochastic_value]], columns=feature_names)
         predicted_change = self.model.predict(input_data)[0]
-        # self.log(f'动态阈值预测: {predicted_change}')
-        # 动态调整阈值
-        buy_threshold = 30 if predicted_change > 0 else 25
-        sell_threshold = 70 if predicted_change < 0 else 65
+
+        base_buy_threshold = self.params.base_buy_threshold
+        base_sell_threshold = self.params.base_sell_threshold
+
+        buy_threshold, sell_threshold = dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold, self.params.min_predicted_change, self.params.max_predicted_change)
+
+        predicted_price = current_price + predicted_change
+        self.predicted_price_line[0] = predicted_price
 
         if (self.rsi_5m[0] < buy_threshold and self.rsi_15m[0] < buy_threshold and self.rsi_30m[0] < buy_threshold and
                 rsi_average < buy_threshold and self.buy_cooldown == 0):
@@ -227,11 +187,9 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
             take_profit_price = current_price + atr_value * self.params.atr_multiplier
             self.sell(exectype=bt.Order.Stop, price=stop_price)
             self.sell(exectype=bt.Order.Limit, price=take_profit_price)
-            self.log(
-                f'BUY , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f}')
+            self.log(f'BUY , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f},PREDICTED_PRICE: {predicted_price:.2f},BUY_THRESHOLD: {buy_threshold:.2f},SELL_THRESHOLD: {sell_threshold:.2f}')
 
-        elif (self.rsi_5m[0] > sell_threshold and self.rsi_15m[0] > sell_threshold and self.rsi_30m[
-            0] > sell_threshold and
+        elif (self.rsi_5m[0] > sell_threshold and self.rsi_15m[0] > sell_threshold and self.rsi_30m[0] > sell_threshold and
               rsi_average > sell_threshold and self.sell_cooldown == 0):
             if self.position.size > 0:
                 self.close()
@@ -241,27 +199,34 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
             take_profit_price = current_price - atr_value * self.params.atr_multiplier
             self.buy(exectype=bt.Order.Stop, price=stop_price)
             self.buy(exectype=bt.Order.Limit, price=take_profit_price)
-            self.log(
-                f'SELL , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f}')
+            self.log(f'SELL , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f},PREDICTED_PRICE: {predicted_price:.2f},BUY_THRESHOLD: {buy_threshold:.2f},SELL_THRESHOLD: {sell_threshold:.2f}')
 
     def stop(self):
-        # 输出绩效指标
         self.trade_info['总交易数'] = self.analyzers.trade_analyzer.get_analysis().total.closed
         self.trade_info['胜率'] = self.analyzers.trade_analyzer.get_analysis().won.total / self.trade_info['总交易数']
         self.trade_info['净利润'] = self.broker.getvalue() - self.params.initial_cash
         self.trade_info['最大回撤'] = self.analyzers.drawdown.get_analysis().max.moneydown
         print(f"策略绩效指标:\n{self.trade_info}")
 
+    def get_analysis(self):
+        return self.predicted_price_line
+
 import backtrader.analyzers as btanalyzers
 if __name__ == '__main__':
     cerebro = bt.Cerebro()
 
     # 指定存放CSV文件的目录
+    # directories = {
+    #     '5m': 'WIFUSDT-5m',
+    #     '15m': 'WIFUSDT-15m',
+    #     '30m': 'WIFUSDT-30m'
+    # }
     directories = {
-        '5m': 'WIFUSDT-5m',
-        '15m': 'WIFUSDT-15m',
-        '30m': 'WIFUSDT-30m'
+        '5m': 'BTCUSDT-5m',
+        '15m': 'BTCUSDT-15m',
+        '30m': 'BTCUSDT-30m'
     }
+
 
     for timeframe, dir_path in directories.items():
         combined_df = read_and_combine_csv(dir_path)
@@ -280,7 +245,7 @@ if __name__ == '__main__':
             data.plotinfo.subplot = True
         cerebro.adddata(data)
 
-    cerebro.broker.setcash(5000)  # 初始资金设为5000
+    cerebro.broker.setcash(10000)  # 初始资金设为5000
 
     # 添加数据和策略
     cerebro.addstrategy(MultiTimeFrameRSIStrategy)
@@ -343,8 +308,18 @@ if __name__ == '__main__':
 
     plt.rcParams['path.simplify'] = True
     plt.rcParams['path.simplify_threshold'] = 1.0
-    plt.rcParams['agg.path.chunksize'] = 5000
-    # cerebro.plot(style='candlestick', barup='black', bardown='white', marker='o', markersize=4, markercolor='orange')
+    plt.rcParams['agg.path.chunksize'] = 10000
+    cerebro.plot(style='candlestick', barup='black', bardown='white', marker='o', markersize=4, markercolor='orange')
+
+    # 获取附图数据
+    strat_analysis = strat.get_analysis()
+    main_plot_dates = [bt.num2date(date) for date in strat.datas[0].datetime.array]
+
+    # 绘制预测价格在附图中
+    plt.figure()
+    plt.plot(main_plot_dates, strat_analysis, color='blue', label='Predicted Price')
+    plt.legend()
+    plt.show()
 #
 # if __name__ == '__main__':
 #     cerebro = bt.Cerebro()
