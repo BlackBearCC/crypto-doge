@@ -43,6 +43,15 @@ def read_and_prepare_data(directory):
     combined_df = pd.concat(df_list)
     combined_df.sort_index(inplace=True)
 
+    # 数据清洗 - 去除插针现象
+    combined_df['price_change'] = combined_df['close'].pct_change()
+    combined_df = combined_df[(combined_df['price_change'] > -0.2) & (combined_df['price_change'] < 0.2)]
+    combined_df.drop(columns=['price_change'], inplace=True)
+
+    # 数据平滑 - 移动平均线
+    combined_df['SMA_3'] = combined_df['close'].rolling(window=3).mean()
+    combined_df['SMA_7'] = combined_df['close'].rolling(window=7).mean()
+
     # 计算技术指标
     logger.info("Calculating technical indicators")
     tqdm.pandas(desc="Calculating technical indicators")
@@ -54,7 +63,7 @@ def read_and_prepare_data(directory):
     combined_df['BB_Low'] = bb_indicator.bollinger_lband()
 
     # 创建滞后特征
-    for col in ['close', 'RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low']:
+    for col in ['close', 'RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'SMA_3', 'SMA_7']:
         combined_df[f'Lag_{col}'] = combined_df[col].shift(1)
 
     # 创建时间特征
@@ -74,10 +83,9 @@ def read_and_prepare_data(directory):
 data = read_and_prepare_data('../BTCUSDT-1h')
 
 # 准备特征和标签
-features = ['RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'Lag_close', 'Lag_RSI', 'Lag_ATR', 'Lag_MACD', 'Lag_BB_High', 'Lag_BB_Low', 'Hour', 'DayOfWeek']
+features = ['RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'SMA_3', 'SMA_7', 'Lag_close', 'Lag_RSI', 'Lag_ATR', 'Lag_MACD', 'Lag_BB_High', 'Lag_BB_Low', 'Lag_SMA_3', 'Lag_SMA_7', 'Hour', 'DayOfWeek']
 X = data[features]
 y = data['Price_Change']
-
 # 数据平衡
 logger.info("Balancing the dataset")
 # 分离多数类和少数类
