@@ -8,8 +8,10 @@ from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, V
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils import resample
 from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
+from ta.volatility import AverageTrueRange, BollingerBands
 from ta.trend import MACD
 import lightgbm as lgb
 from xgboost import XGBRegressor
@@ -17,10 +19,16 @@ from tqdm import tqdm
 import mplfinance as mpf
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+import logging
 
+# 设置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # 读取CSV文件并预处理数据
 def read_and_prepare_data(directory):
+    logger.info("Reading and preparing data from directory: %s", directory)
     data_folder = Path(directory)
     all_files = list(data_folder.glob('*.csv'))
     df_list = []
@@ -36,17 +44,18 @@ def read_and_prepare_data(directory):
     combined_df.sort_index(inplace=True)
 
     # 计算技术指标
+    logger.info("Calculating technical indicators")
     tqdm.pandas(desc="Calculating technical indicators")
     combined_df['RSI'] = RSIIndicator(combined_df['close']).rsi()
-    combined_df['ATR'] = AverageTrueRange(combined_df['high'], combined_df['low'],
-                                          combined_df['close']).average_true_range()
+    combined_df['ATR'] = AverageTrueRange(combined_df['high'], combined_df['low'], combined_df['close']).average_true_range()
     combined_df['MACD'] = MACD(combined_df['close']).macd()
+    bb_indicator = BollingerBands(combined_df['close'])
+    combined_df['BB_High'] = bb_indicator.bollinger_hband()
+    combined_df['BB_Low'] = bb_indicator.bollinger_lband()
 
     # 创建滞后特征
-    combined_df['Lag_Close'] = combined_df['close'].shift(1)
-    combined_df['Lag_RSI'] = combined_df['RSI'].shift(1)
-    combined_df['Lag_ATR'] = combined_df['ATR'].shift(1)
-    combined_df['Lag_MACD'] = combined_df['MACD'].shift(1)
+    for col in ['close', 'RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low']:
+        combined_df[f'Lag_{col}'] = combined_df[col].shift(1)
 
     # 创建时间特征
     combined_df['Hour'] = combined_df.index.hour
@@ -58,20 +67,19 @@ def read_and_prepare_data(directory):
 
     # 删除缺失值
     combined_df.dropna(inplace=True)
+    logger.info("Data preparation completed")
 
     return combined_df
-
 
 data = read_and_prepare_data('../BTCUSDT-1h')
 
 # 准备特征和标签
-features = ['RSI', 'ATR', 'MACD', 'Lag_Close', 'Lag_RSI', 'Lag_ATR', 'Lag_MACD', 'Hour', 'DayOfWeek']
+features = ['RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'Lag_close', 'Lag_RSI', 'Lag_ATR', 'Lag_MACD', 'Lag_BB_High', 'Lag_BB_Low', 'Hour', 'DayOfWeek']
 X = data[features]
 y = data['Price_Change']
 
 # 数据平衡
-from sklearn.utils import resample
-
+logger.info("Balancing the dataset")
 # 分离多数类和少数类
 majority_class = data[data['Direction'] == 0]
 minority_class = data[data['Direction'] == 1]
@@ -84,8 +92,12 @@ data_balanced = pd.concat([majority_class, upsampled_minority_class])
 X_balanced = data_balanced[features]
 y_balanced = data_balanced['Price_Change']
 
+# 数据标准化
+scaler = StandardScaler()
+X_balanced = scaler.fit_transform(X_balanced)
+
 # 分割数据集
-print("Splitting data...")
+logger.info("Splitting data...")
 X_train, X_test, y_train, y_test = train_test_split(X_balanced, y_balanced, test_size=0.2, random_state=42)
 
 y_train_direction = (y_train > 0).astype(int)
@@ -98,11 +110,12 @@ models = {
     'Random Forest Regressor': RandomForestRegressor(random_state=42),
     'Support Vector Regressor': SVR(),
     'LightGBM': lgb.LGBMRegressor(device='gpu'),
-    'XGBoost': XGBRegressor(tree_method='hist', device='cuda')
+    'XGBoost': XGBRegressor(tree_method='gpu_hist')
 }
 
 trained_models = {}
 for name, model in tqdm(models.items(), desc="Training models"):
+    logger.info("Training %s model", name)
     if name in ['Gradient Boosting Regressor', 'LightGBM', 'XGBoost']:
         param_grid = {
             'n_estimators': [50, 100, 200],
@@ -110,10 +123,11 @@ for name, model in tqdm(models.items(), desc="Training models"):
             'learning_rate': [0.01, 0.05, 0.1]
         }
 
-        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=3, scoring='neg_mean_squared_error')
+        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
         grid_search.fit(X_train, y_train)
         best_model = grid_search.best_estimator_
         trained_models[name] = best_model
+        logger.info("%s model training completed with best parameters: %s", name, grid_search.best_params_)
     elif name == 'Random Forest Regressor':
         param_grid = {
             'n_estimators': [50, 100, 200],
@@ -121,16 +135,18 @@ for name, model in tqdm(models.items(), desc="Training models"):
             'max_features': ['auto', 'sqrt', 'log2']
         }
 
-        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=3, scoring='neg_mean_squared_error')
+        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
         grid_search.fit(X_train, y_train)
         best_model = grid_search.best_estimator_
         trained_models[name] = best_model
+        logger.info("%s model training completed with best parameters: %s", name, grid_search.best_params_)
     else:
         model.fit(X_train, y_train)
         trained_models[name] = model
+        logger.info("%s model training completed", name)
 
 # 集成模型
-print("Training Ensemble Model...")
+logger.info("Training Ensemble Model...")
 ensemble_model = VotingRegressor(estimators=[
     ('lr', trained_models['Linear Regression']),
     ('gbr', trained_models['Gradient Boosting Regressor']),
@@ -140,6 +156,7 @@ ensemble_model = VotingRegressor(estimators=[
     ('xgb', trained_models['XGBoost'])
 ])
 ensemble_model.fit(X_train, y_train)
+logger.info("Ensemble model training completed")
 
 
 # LSTM 模型
@@ -165,16 +182,23 @@ def prepare_lstm_data(X, y, time_steps=1):
 
 
 time_steps = 10
-X_train_lstm, y_train_lstm = prepare_lstm_data(X_train, y_train, time_steps)
-X_test_lstm, y_test_lstm = prepare_lstm_data(X_test, y_test, time_steps)
+X_train_lstm, y_train_lstm = prepare_lstm_data(pd.DataFrame(X_train, columns=features), y_train, time_steps)
+X_test_lstm, y_test_lstm = prepare_lstm_data(pd.DataFrame(X_test, columns=features), y_test, time_steps)
 
 # 训练LSTM模型
+logger.info("Training LSTM model...")
 lstm_model = create_lstm_model((X_train_lstm.shape[1], X_train_lstm.shape[2]))
-lstm_model.fit(X_train_lstm, y_train_lstm, epochs=10, batch_size=32, validation_split=0.2)
+callbacks = [
+    EarlyStopping(monitor='val_loss', patience=3),
+    ModelCheckpoint('best_lstm_model.h5', save_best_only=True, monitor='val_loss', mode='min')
+]
+lstm_model.fit(X_train_lstm, y_train_lstm, epochs=20, batch_size=32, validation_split=0.2, callbacks=callbacks)
+logger.info("LSTM model training completed")
 
 
 # 评估LSTM模型
 def evaluate_lstm_model(model, X_test, y_test, y_test_direction):
+    logger.info("Evaluating LSTM model...")
     y_pred = model.predict(X_test)
     y_pred_direction = (y_pred.flatten() > 0).astype(int)
 
@@ -183,10 +207,10 @@ def evaluate_lstm_model(model, X_test, y_test, y_test_direction):
     mae = mean_absolute_error(y_test, y_pred)
     accuracy = (y_pred_direction == y_test_direction[:len(y_pred_direction)]).mean()
 
-    print(f'Mean Squared Error: {mse}')
-    print(f'Root Mean Squared Error: {rmse}')
-    print(f'Mean Absolute Error: {mae}')
-    print(f'Prediction Accuracy: {accuracy:.2%}')
+    logger.info(f'Mean Squared Error: {mse}')
+    logger.info(f'Root Mean Squared Error: {rmse}')
+    logger.info(f'Mean Absolute Error: {mae}')
+    logger.info(f'Prediction Accuracy: {accuracy:.2%}')
 
     plt.figure(figsize=(10, 5))
     plt.scatter(y_test, y_pred, alpha=0.5)
@@ -198,12 +222,13 @@ def evaluate_lstm_model(model, X_test, y_test, y_test_direction):
     return y_pred
 
 
-print("Evaluating LSTM Model:")
+logger.info("Evaluating LSTM Model:")
 evaluate_lstm_model(lstm_model, X_test_lstm, y_test_lstm, y_test_direction[time_steps:])
 
 
 # 评估其他模型
 def evaluate_model(model, X_test, y_test, y_test_direction):
+    logger.info(f"Evaluating {model.__class__.__name__} model...")
     y_pred = model.predict(X_test)
     y_pred_direction = (y_pred > 0).astype(int)
 
@@ -212,10 +237,10 @@ def evaluate_model(model, X_test, y_test, y_test_direction):
     mae = mean_absolute_error(y_test, y_pred)
     accuracy = (y_pred_direction == y_test_direction).mean()
 
-    print(f'Mean Squared Error: {mse}')
-    print(f'Root Mean Squared Error: {rmse}')
-    print(f'Mean Absolute Error: {mae}')
-    print(f'Prediction Accuracy: {accuracy:.2%}')
+    logger.info(f'Mean Squared Error: {mse}')
+    logger.info(f'Root Mean Squared Error: {rmse}')
+    logger.info(f'Mean Absolute Error: {mae}')
+    logger.info(f'Prediction Accuracy: {accuracy:.2%}')
 
     plt.figure(figsize=(10, 5))
     plt.scatter(y_test, y_pred, alpha=0.5)
@@ -234,10 +259,10 @@ def get_predicted_prices(model, X_test, y_test):
 
 
 for name, model in trained_models.items():
-    print(f"Evaluating {name} Model:")
+    logger.info(f"Evaluating {name} Model:")
     evaluate_model(model, X_test, y_test, y_test_direction)
 
-print("Evaluating Ensemble Model:")
+logger.info("Evaluating Ensemble Model:")
 y_pred_ensemble = evaluate_model(ensemble_model, X_test, y_test, y_test_direction)
 
 
@@ -271,19 +296,19 @@ def plot_feature_importance(model, feature_names):
     plt.show()
 
 
-print("Random Forest Feature Importance:")
+logger.info("Random Forest Feature Importance:")
 plot_feature_importance(trained_models['Random Forest Regressor'], features)
 
-print("Gradient Boosting Regressor Feature Importance:")
+logger.info("Gradient Boosting Regressor Feature Importance:")
 plot_feature_importance(trained_models['Gradient Boosting Regressor'], features)
 
-print("XGBoost Feature Importance:")
+logger.info("XGBoost Feature Importance:")
 plot_feature_importance(trained_models['XGBoost'], features)
 
-print("LightGBM Feature Importance:")
+logger.info("LightGBM Feature Importance:")
 plot_feature_importance(trained_models['LightGBM'], features)
 
 # 保存模型
-print("Saving model...")
-joblib.dump(ensemble_model, '../ensemble_model.pkl')
-print("Model saved.")
+logger.info("Saving model...")
+joblib.dump(ensemble_model, '../54%_ensemble_model.pkl')
+logger.info("Model saved.")
