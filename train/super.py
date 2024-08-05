@@ -4,10 +4,10 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, VotingRegressor
+from sklearn.ensemble import RandomForestRegressor, VotingRegressor
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import resample
 from ta.momentum import RSIIndicator
@@ -20,6 +20,8 @@ import mplfinance as mpf
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout
 from keras.callbacks import EarlyStopping, ModelCheckpoint
+from sklearn.experimental import enable_halving_search_cv
+from sklearn.model_selection import HalvingGridSearchCV
 import logging
 
 # 设置日志
@@ -86,8 +88,8 @@ data = read_and_prepare_data('../BTCUSDT-1h')
 features = ['RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'SMA_3', 'SMA_7', 'Lag_close', 'Lag_RSI', 'Lag_ATR', 'Lag_MACD', 'Lag_BB_High', 'Lag_BB_Low', 'Lag_SMA_3', 'Lag_SMA_7', 'Hour', 'DayOfWeek']
 X = data[features]
 y = data['Price_Change']
-# 数据平衡
-logger.info("Balancing the dataset")
+direction = data['Direction']
+
 # 分离多数类和少数类
 majority_class = data[data['Direction'] == 0]
 minority_class = data[data['Direction'] == 1]
@@ -114,127 +116,68 @@ y_test_direction = (y_test > 0).astype(int)
 # 训练模型
 models = {
     'Linear Regression': LinearRegression(),
-    # 'Gradient Boosting Regressor': GradientBoostingRegressor(random_state=42),
     'Random Forest Regressor': RandomForestRegressor(random_state=42, n_jobs=-1),
     'Support Vector Regressor': SVR(),
     'LightGBM': lgb.LGBMRegressor(device='gpu', n_jobs=-1),
-    'XGBoost': XGBRegressor( tree_method="hist", device="cuda", n_jobs=-1)
+    'XGBoost': XGBRegressor(tree_method="hist", device="cuda", n_jobs=-1)
 }
 
 trained_models = {}
 for name, model in tqdm(models.items(), desc="Training models"):
     logger.info("Training %s model", name)
-    if name in ['Gradient Boosting Regressor', 'LightGBM', 'XGBoost']:
+    if name in ['LightGBM', 'XGBoost']:
         param_grid = {
-            'n_estimators': [50, 100, 200],
+            'n_estimators': [100, 200, 300],
             'max_depth': [3, 5, 7],
             'learning_rate': [0.01, 0.05, 0.1]
         }
 
-        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
-        grid_search.fit(X_train, y_train)
-        best_model = grid_search.best_estimator_
+        halving_search = HalvingGridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
+        halving_search.fit(X_train, y_train)
+        best_model = halving_search.best_estimator_
         trained_models[name] = best_model
-        logger.info("%s model training completed with best parameters: %s", name, grid_search.best_params_)
+        logger.info("%s model training completed with best parameters: %s", name, halving_search.best_params_)
     elif name == 'Random Forest Regressor':
         param_grid = {
-            'n_estimators': [50, 100, 200],
-            'max_depth': [3, 5, 7],
-            'max_features': ['sqrt', 'log2']  # 修正了'auto'
+            'n_estimators': [100, 200, 300],
+            'max_depth': [None, 10, 20, 30],
+            'max_features': ['sqrt', 'log2', None]
         }
 
-        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
-        grid_search.fit(X_train, y_train)
-        best_model = grid_search.best_estimator_
+        halving_search = HalvingGridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
+        halving_search.fit(X_train, y_train)
+        best_model = halving_search.best_estimator_
         trained_models[name] = best_model
-        logger.info("%s model training completed with best parameters: %s", name, grid_search.best_params_)
+        logger.info("%s model training completed with best parameters: %s", name, halving_search.best_params_)
     else:
         model.fit(X_train, y_train)
         trained_models[name] = model
         logger.info("%s model training completed", name)
 
-# 集成模型
-logger.info("Training Ensemble Model...")
-ensemble_model = VotingRegressor(estimators=[
-    ('lr', trained_models['Linear Regression']),
-    # ('gbr', trained_models['Gradient Boosting Regressor']),
-    ('rf', trained_models['Random Forest Regressor']),
-    ('svr', trained_models['Support Vector Regressor']),
-    ('lgb', trained_models['LightGBM']),
-    ('xgb', trained_models['XGBoost'])
-])
-ensemble_model.fit(X_train, y_train)
-logger.info("Ensemble model training completed")
+# 使用基础模型的预测准确率作为新特征
+X_train_meta = pd.DataFrame(X_train, columns=features).copy()
+X_test_meta = pd.DataFrame(X_test, columns=features).copy()
 
+for name, model in trained_models.items():
+    logger.info(f"Generating predictions for {name} model")
+    X_train_meta[f'{name}_pred'] = model.predict(X_train)
+    X_test_meta[f'{name}_pred'] = model.predict(X_test)
 
-# LSTM 模型
-def create_lstm_model(input_shape):
-    model = Sequential()
-    model.add(LSTM(50, return_sequences=True, input_shape=input_shape))
-    model.add(Dropout(0.2))
-    model.add(LSTM(50, return_sequences=False))
-    model.add(Dropout(0.2))
-    model.add(Dense(1))
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    return model
+# 数据标准化
+scaler_meta = StandardScaler()
+X_train_meta = scaler_meta.fit_transform(X_train_meta)
+X_test_meta = scaler_meta.transform(X_test_meta)
 
+# 使用新的特征进行再训练
+meta_model = RandomForestRegressor(random_state=42, n_jobs=-1)
+meta_model.fit(X_train_meta, y_train)
+logger.info("Meta model training completed")
 
-# 准备LSTM数据
-def prepare_lstm_data(X, y, time_steps=1):
-    Xs, ys = [], []
-    for i in range(len(X) - time_steps):
-        v = X.iloc[i:(i + time_steps)].values
-        Xs.append(v)
-        ys.append(y.iloc[i + time_steps])
-    return np.array(Xs), np.array(ys)
-
-
-time_steps = 52
-X_train_lstm, y_train_lstm = prepare_lstm_data(pd.DataFrame(X_train, columns=features), y_train, time_steps)
-X_test_lstm, y_test_lstm = prepare_lstm_data(pd.DataFrame(X_test, columns=features), y_test, time_steps)
-
-# 训练LSTM模型
-logger.info("Training LSTM model...")
-lstm_model = create_lstm_model((X_train_lstm.shape[1], X_train_lstm.shape[2]))
-callbacks = [
-    EarlyStopping(monitor='val_loss', patience=3),
-    ModelCheckpoint('best_lstm_model.h5', save_best_only=True, monitor='val_loss', mode='min')
-]
-lstm_model.fit(X_train_lstm, y_train_lstm, epochs=20, batch_size=32, validation_split=0.2, callbacks=callbacks)
-logger.info("LSTM model training completed")
-
-
-# 评估LSTM模型
-def evaluate_lstm_model(model, X_test, y_test, y_test_direction):
-    logger.info("Evaluating LSTM model...")
-    y_pred = model.predict(X_test)
-    y_pred_direction = (y_pred.flatten() > 0).astype(int)
-
-    mse = mean_squared_error(y_test, y_pred)
-    rmse = np.sqrt(mse)
-    mae = mean_absolute_error(y_test, y_pred)
-    accuracy = (y_pred_direction == y_test_direction[:len(y_pred_direction)]).mean()
-
-    logger.info(f'Mean Squared Error: {mse}')
-    logger.info(f'Root Mean Squared Error: {rmse}')
-    logger.info(f'Mean Absolute Error: {mae}')
-    logger.info(f'Prediction Accuracy: {accuracy:.2%}')
-
-    plt.figure(figsize=(10, 5))
-    plt.scatter(y_test, y_pred, alpha=0.5)
-    plt.xlabel('Actual Price Change')
-    plt.ylabel('Predicted Price Change')
-    plt.title('Actual vs Predicted Price Change')
-    plt.show()
-
-    return y_pred
-
-
-logger.info("Evaluating LSTM Model:")
-evaluate_lstm_model(lstm_model, X_test_lstm, y_test_lstm, y_test_direction[time_steps:])
-
-
-# 评估其他模型
+# 保存模型
+logger.info("Saving meta model...")
+joblib.dump(meta_model, '../meta_model.pkl')
+logger.info("Meta model saved.")
+# 评估模型函数
 def evaluate_model(model, X_test, y_test, y_test_direction):
     logger.info(f"Evaluating {model.__class__.__name__} model...")
     y_pred = model.predict(X_test)
@@ -250,70 +193,65 @@ def evaluate_model(model, X_test, y_test, y_test_direction):
     logger.info(f'Mean Absolute Error: {mae}')
     logger.info(f'Prediction Accuracy: {accuracy:.2%}')
 
-    plt.figure(figsize=(10, 5))
-    plt.scatter(y_test, y_pred, alpha=0.5)
-    plt.xlabel('Actual Price Change')
-    plt.ylabel('Predicted Price Change')
-    plt.title('Actual vs Predicted Price Change')
-    plt.show()
+    results = {
+        'MSE': mse,
+        'RMSE': rmse,
+        'MAE': mae,
+        'Accuracy': accuracy
+    }
 
-    return y_pred
+    return y_pred, results
 
-
-# 获取预测价格
-def get_predicted_prices(model, X_test, y_test):
-    y_pred = model.predict(X_test)
-    return y_test.index, y_test.values, y_pred
-
-
+# 评估所有模型并保存结果
+results_dict = {}
 for name, model in trained_models.items():
     logger.info(f"Evaluating {name} Model:")
-    evaluate_model(model, X_test, y_test, y_test_direction)
+    _, results = evaluate_model(model, X_test, y_test, y_test_direction)
+    results_dict[name] = results
 
-logger.info("Evaluating Ensemble Model:")
-y_pred_ensemble = evaluate_model(ensemble_model, X_test, y_test, y_test_direction)
+logger.info("Evaluating Meta Model:")
+_, results = evaluate_model(meta_model, X_test_meta, y_test, y_test_direction)
+results_dict['Meta Model'] = results
 
+# 将评估结果保存为DataFrame
+results_df = pd.DataFrame(results_dict).T
 
-# 绘制K线图
-def plot_kline(data, actual_prices, predicted_prices, title='Actual vs Predicted Prices'):
-    data['Actual'] = actual_prices
-    data['Predicted'] = predicted_prices
-    apd = [mpf.make_addplot(data['Actual'], color='blue'),
-           mpf.make_addplot(data['Predicted'], color='red')]
-    mpf.plot(data, type='candle', addplot=apd, style='charles', title=title)
+# 使用tabulate生成漂亮的表格
+from tabulate import tabulate
+from fpdf import FPDF
 
+table = tabulate(results_df, headers='keys', tablefmt='pipe')
 
-# 获取实际和预测价格
-actual_index, actual_prices, predicted_prices = get_predicted_prices(ensemble_model, X_test, y_test)
-data_for_plot = data.loc[actual_index]
+# 打印表格到控制台
+print(table)
 
-# 绘制实际价格和预测价格K线图
-plot_kline(data_for_plot, actual_prices, predicted_prices)
+# 将表格保存为PDF文件
+class PDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 10, 'Model Evaluation Results', 0, 1, 'C')
 
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
-# 获取特征重要性
-def plot_feature_importance(model, feature_names):
-    importances = model.feature_importances_
-    indices = np.argsort(importances)[::-1]
+    def chapter_title(self, title):
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 10, title, 0, 1, 'L')
+        self.ln(10)
 
-    plt.figure(figsize=(10, 5))
-    plt.title("Feature Importances")
-    plt.bar(range(len(importances)), importances[indices], align="center")
-    plt.xticks(range(len(importances)), [feature_names[i] for i in indices], rotation=90)
-    plt.xlim([-1, len(importances)])
-    plt.show()
+    def chapter_body(self, body):
+        self.set_font('Arial', '', 12)
+        self.multi_cell(0, 10, body)
+        self.ln()
 
+pdf = PDF()
+pdf.add_page()
+pdf.chapter_title('Model Evaluation Results')
+pdf.chapter_body(table)
+pdf.output('model_evaluation_results.pdf')
 
-logger.info("Random Forest Feature Importance:")
-plot_feature_importance(trained_models['Random Forest Regressor'], features)
+# 显示评估结果表
+print(results_df)
 
-logger.info("XGBoost Feature Importance:")
-plot_feature_importance(trained_models['XGBoost'], features)
-
-logger.info("LightGBM Feature Importance:")
-plot_feature_importance(trained_models['LightGBM'], features)
-
-# 保存模型
-logger.info("Saving model...")
-joblib.dump(ensemble_model, '../55%_ensemble_model.pkl')
-logger.info("Model saved.")
