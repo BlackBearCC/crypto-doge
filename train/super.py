@@ -22,6 +22,12 @@ from keras.layers import LSTM, Dense, Dropout
 from keras.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.experimental import enable_halving_search_cv
 from sklearn.model_selection import HalvingGridSearchCV
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.feature_selection import SelectFromModel
+from sklearn.linear_model import Lasso
+from tabulate import tabulate
+from fpdf import FPDF
 import logging
 
 # 设置日志
@@ -113,7 +119,34 @@ X_train, X_test, y_train, y_test = train_test_split(X_balanced, y_balanced, test
 y_train_direction = (y_train > 0).astype(int)
 y_test_direction = (y_test > 0).astype(int)
 
-# 训练模型
+# 无监督学习特征提取
+# 聚类
+kmeans = KMeans(n_clusters=5, n_init=20, random_state=42)  # 显式设置 n_init
+X_train_cluster = kmeans.fit_predict(X_train)
+X_test_cluster = kmeans.predict(X_test)
+
+# PCA降维
+pca = PCA(n_components=5)
+X_train_pca = pca.fit_transform(X_train)
+X_test_pca = pca.transform(X_test)
+
+# 将聚类标签和PCA特征添加到原始特征中
+X_train = np.hstack((X_train, X_train_cluster.reshape(-1, 1), X_train_pca))
+X_test = np.hstack((X_test, X_test_cluster.reshape(-1, 1), X_test_pca))
+
+# 标准化特征
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# 特征选择
+lasso = Lasso(alpha=0.1, max_iter=10000)  # 增加alpha和最大迭代次数
+lasso.fit(X_train, y_train)
+model = SelectFromModel(lasso, prefit=True)
+X_train_selected = model.transform(X_train)
+X_test_selected = model.transform(X_test)
+
+# 训练基础模型
 models = {
     'Linear Regression': LinearRegression(),
     'Random Forest Regressor': RandomForestRegressor(random_state=42, n_jobs=-1),
@@ -133,7 +166,7 @@ for name, model in tqdm(models.items(), desc="Training models"):
         }
 
         halving_search = HalvingGridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
-        halving_search.fit(X_train, y_train)
+        halving_search.fit(X_train_selected, y_train)
         best_model = halving_search.best_estimator_
         trained_models[name] = best_model
         logger.info("%s model training completed with best parameters: %s", name, halving_search.best_params_)
@@ -145,23 +178,27 @@ for name, model in tqdm(models.items(), desc="Training models"):
         }
 
         halving_search = HalvingGridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
-        halving_search.fit(X_train, y_train)
+        halving_search.fit(X_train_selected, y_train)
         best_model = halving_search.best_estimator_
         trained_models[name] = best_model
         logger.info("%s model training completed with best parameters: %s", name, halving_search.best_params_)
     else:
-        model.fit(X_train, y_train)
+        model.fit(X_train_selected, y_train)
         trained_models[name] = model
         logger.info("%s model training completed", name)
 
 # 使用基础模型的预测准确率作为新特征
-X_train_meta = pd.DataFrame(X_train, columns=features).copy()
-X_test_meta = pd.DataFrame(X_test, columns=features).copy()
+X_train_meta = pd.DataFrame(X_train_selected).copy()
+X_test_meta = pd.DataFrame(X_test_selected).copy()
+
+# 将所有列名转换为字符串类型
+X_train_meta.columns = X_train_meta.columns.astype(str)
+X_test_meta.columns = X_test_meta.columns.astype(str)
 
 for name, model in trained_models.items():
     logger.info(f"Generating predictions for {name} model")
-    X_train_meta[f'{name}_pred'] = model.predict(X_train)
-    X_test_meta[f'{name}_pred'] = model.predict(X_test)
+    X_train_meta[f'{name}_pred'] = model.predict(X_train_selected)
+    X_test_meta[f'{name}_pred'] = model.predict(X_test_selected)
 
 # 数据标准化
 scaler_meta = StandardScaler()
@@ -173,10 +210,6 @@ meta_model = RandomForestRegressor(random_state=42, n_jobs=-1)
 meta_model.fit(X_train_meta, y_train)
 logger.info("Meta model training completed")
 
-# 保存模型
-logger.info("Saving meta model...")
-joblib.dump(meta_model, '../meta_model.pkl')
-logger.info("Meta model saved.")
 # 评估模型函数
 def evaluate_model(model, X_test, y_test, y_test_direction):
     logger.info(f"Evaluating {model.__class__.__name__} model...")
@@ -206,7 +239,7 @@ def evaluate_model(model, X_test, y_test, y_test_direction):
 results_dict = {}
 for name, model in trained_models.items():
     logger.info(f"Evaluating {name} Model:")
-    _, results = evaluate_model(model, X_test, y_test, y_test_direction)
+    _, results = evaluate_model(model, X_test_selected, y_test, y_test_direction)
     results_dict[name] = results
 
 logger.info("Evaluating Meta Model:")
@@ -217,9 +250,6 @@ results_dict['Meta Model'] = results
 results_df = pd.DataFrame(results_dict).T
 
 # 使用tabulate生成漂亮的表格
-from tabulate import tabulate
-from fpdf import FPDF
-
 table = tabulate(results_df, headers='keys', tablefmt='pipe')
 
 # 打印表格到控制台
@@ -254,4 +284,3 @@ pdf.output('model_evaluation_results.pdf')
 
 # 显示评估结果表
 print(results_df)
-
