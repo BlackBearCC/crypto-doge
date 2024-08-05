@@ -106,11 +106,11 @@ y_test_direction = (y_test > 0).astype(int)
 # 训练模型
 models = {
     'Linear Regression': LinearRegression(),
-    'Gradient Boosting Regressor': GradientBoostingRegressor(random_state=42),
-    'Random Forest Regressor': RandomForestRegressor(random_state=42),
+    # 'Gradient Boosting Regressor': GradientBoostingRegressor(random_state=42),
+    'Random Forest Regressor': RandomForestRegressor(random_state=42, n_jobs=-1),
     'Support Vector Regressor': SVR(),
-    'LightGBM': lgb.LGBMRegressor(device='gpu'),
-    'XGBoost': XGBRegressor(tree_method='gpu_hist')
+    'LightGBM': lgb.LGBMRegressor(device='gpu', n_jobs=-1),
+    'XGBoost': XGBRegressor( tree_method="hist", device="cuda", n_jobs=-1)
 }
 
 trained_models = {}
@@ -132,7 +132,7 @@ for name, model in tqdm(models.items(), desc="Training models"):
         param_grid = {
             'n_estimators': [50, 100, 200],
             'max_depth': [3, 5, 7],
-            'max_features': ['auto', 'sqrt', 'log2']
+            'max_features': ['sqrt', 'log2']  # 修正了'auto'
         }
 
         grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=5, scoring='neg_mean_squared_error')
@@ -149,7 +149,7 @@ for name, model in tqdm(models.items(), desc="Training models"):
 logger.info("Training Ensemble Model...")
 ensemble_model = VotingRegressor(estimators=[
     ('lr', trained_models['Linear Regression']),
-    ('gbr', trained_models['Gradient Boosting Regressor']),
+    # ('gbr', trained_models['Gradient Boosting Regressor']),
     ('rf', trained_models['Random Forest Regressor']),
     ('svr', trained_models['Support Vector Regressor']),
     ('lgb', trained_models['LightGBM']),
@@ -181,7 +181,7 @@ def prepare_lstm_data(X, y, time_steps=1):
     return np.array(Xs), np.array(ys)
 
 
-time_steps = 10
+time_steps = 52
 X_train_lstm, y_train_lstm = prepare_lstm_data(pd.DataFrame(X_train, columns=features), y_train, time_steps)
 X_test_lstm, y_test_lstm = prepare_lstm_data(pd.DataFrame(X_test, columns=features), y_test, time_steps)
 
@@ -299,9 +299,6 @@ def plot_feature_importance(model, feature_names):
 logger.info("Random Forest Feature Importance:")
 plot_feature_importance(trained_models['Random Forest Regressor'], features)
 
-logger.info("Gradient Boosting Regressor Feature Importance:")
-plot_feature_importance(trained_models['Gradient Boosting Regressor'], features)
-
 logger.info("XGBoost Feature Importance:")
 plot_feature_importance(trained_models['XGBoost'], features)
 
@@ -310,5 +307,5 @@ plot_feature_importance(trained_models['LightGBM'], features)
 
 # 保存模型
 logger.info("Saving model...")
-joblib.dump(ensemble_model, '../54%_ensemble_model.pkl')
+joblib.dump(ensemble_model, '../55%_ensemble_model.pkl')
 logger.info("Model saved.")
