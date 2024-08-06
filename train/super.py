@@ -35,60 +35,52 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # 读取CSV文件并预处理数据
-def read_and_prepare_data(directory):
-    logger.info("Reading and preparing data from directory: %s", directory)
-    data_folder = Path(directory)
-    all_files = list(data_folder.glob('*.csv'))
-    df_list = []
+def read_and_prepare_data(filepath):
+    logger.info("Reading and preparing data from file: %s", filepath)
+    df = pd.read_parquet(filepath)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+    df.set_index('timestamp', inplace=True)
 
-    for file_path in tqdm(all_files, desc="Reading CSV files"):
-        df = pd.read_csv(file_path)
-        df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
-        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-        df.set_index('timestamp', inplace=True)
-        df_list.append(df)
-
-    combined_df = pd.concat(df_list)
-    combined_df.sort_index(inplace=True)
-
-    # 数据清洗 - 去除插针现象
-    combined_df['price_change'] = combined_df['close'].pct_change()
-    combined_df = combined_df[(combined_df['price_change'] > -0.2) & (combined_df['price_change'] < 0.2)]
-    combined_df.drop(columns=['price_change'], inplace=True)
+    # 数据清洗 - 去除极端的价格波动
+    df['price_change'] = df['close'].pct_change()
+    df = df[(df['price_change'] > -0.2) & (df['price_change'] < 0.2)]
+    df.drop(columns=['price_change'], inplace=True)
 
     # 数据平滑 - 移动平均线
-    combined_df['SMA_3'] = combined_df['close'].rolling(window=3).mean()
-    combined_df['SMA_7'] = combined_df['close'].rolling(window=7).mean()
+    df['SMA_3'] = df['close'].rolling(window=3).mean()
+    df['SMA_7'] = df['close'].rolling(window=7).mean()
 
     # 计算技术指标
     logger.info("Calculating technical indicators")
     tqdm.pandas(desc="Calculating technical indicators")
-    combined_df['RSI'] = RSIIndicator(combined_df['close']).rsi()
-    combined_df['ATR'] = AverageTrueRange(combined_df['high'], combined_df['low'], combined_df['close']).average_true_range()
-    combined_df['MACD'] = MACD(combined_df['close']).macd()
-    bb_indicator = BollingerBands(combined_df['close'])
-    combined_df['BB_High'] = bb_indicator.bollinger_hband()
-    combined_df['BB_Low'] = bb_indicator.bollinger_lband()
+    df['RSI'] = RSIIndicator(df['close']).rsi()
+    df['ATR'] = AverageTrueRange(df['high'], df['low'], df['close']).average_true_range()
+    df['MACD'] = MACD(df['close']).macd()
+    bb_indicator = BollingerBands(df['close'])
+    df['BB_High'] = bb_indicator.bollinger_hband()
+    df['BB_Low'] = bb_indicator.bollinger_lband()
 
     # 创建滞后特征
     for col in ['close', 'RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'SMA_3', 'SMA_7']:
-        combined_df[f'Lag_{col}'] = combined_df[col].shift(1)
+        df[f'Lag_{col}'] = df[col].shift(1)
 
-    # 创建时间特征
-    combined_df['Hour'] = combined_df.index.hour
-    combined_df['DayOfWeek'] = combined_df.index.dayofweek
+        # 创建时间特征
+    df['Minute'] = df.index.minute
+    df['Hour'] = df.index.hour
+    df['DayOfWeek'] = df.index.dayofweek
 
     # 创建标签：未来15分钟的价格变化
-    combined_df['Price_Change'] = combined_df['close'].shift(-1) - combined_df['close']
-    combined_df['Direction'] = (combined_df['Price_Change'] > 0).astype(int)  # 1表示涨，0表示跌
+    df['Price_Change'] = df['close'].shift(-1) - df['close']
+    df['Direction'] = (df['Price_Change'] > 0).astype(int)  # 1表示涨，0表示跌
 
     # 删除缺失值
-    combined_df.dropna(inplace=True)
+    df.dropna(inplace=True)
     logger.info("Data preparation completed")
 
-    return combined_df
+    return df
 
-data = read_and_prepare_data('../BTCUSDT-1h')
+data = read_and_prepare_data('../BTC_USDT_ohlcv_data.parquet')
 
 # 准备特征和标签
 features = ['RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'SMA_3', 'SMA_7', 'Lag_close', 'Lag_RSI', 'Lag_ATR', 'Lag_MACD', 'Lag_BB_High', 'Lag_BB_Low', 'Lag_SMA_3', 'Lag_SMA_7', 'Hour', 'DayOfWeek']
@@ -117,6 +109,7 @@ logger.info("Splitting data...")
 X_train, X_test, y_train, y_test = train_test_split(X_balanced, y_balanced, test_size=0.2, random_state=42)
 
 y_train_direction = (y_train > 0).astype(int)
+
 y_test_direction = (y_test > 0).astype(int)
 
 # 无监督学习特征提取
