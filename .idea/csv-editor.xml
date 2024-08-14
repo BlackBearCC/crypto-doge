@@ -24,6 +24,55 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="\BTCUSDT-15m-2024-08-01-11\BTCUSDT-15m-2024-08-01.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\BTCUSDT-15m-2024-08-01-11\BTCUSDT-15m-2024-08-03.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\BTCUSDT-15m\BTCUSDT-15m-2023-09.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\BTCUSDT-15m\BTCUSDT-15m-2024-07.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\BTCUSDT-15m\BTCUSDT-15m-2024-08-01.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\BTCUSDT-1h-2024-08-01-12\BTCUSDT-1h-2024-08-01.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\BTCUSDT-1h-2024-08-01-12\temp_BTCUSDT-1h-2024-08-01.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="\BTCUSDT-1h\BTCUSDT-1h-2020-01.csv">
           <value>
             <Attribute>
@@ -242,6 +291,13 @@
           </value>
         </entry>
         <entry key="\BTCUSDT-5m\BTCUSDT-5m-2023-09.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\sentiment-bitcoin.csv">
           <value>
             <Attribute>
               <option name="separator" value="," />

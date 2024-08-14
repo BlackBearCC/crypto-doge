@@ -1,10 +1,14 @@
+from datetime import datetime
 import joblib
 import matplotlib.pyplot as plt
+# 必须在使用 HalvingGridSearchCV 之前导入
+from sklearn.experimental import enable_halving_search_cv  # 必须显式导入
+from sklearn.model_selection import HalvingGridSearchCV
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor, VotingRegressor
+from sklearn.linear_model import LinearRegression, Lasso
+from sklearn.ensemble import RandomForestRegressor, StackingRegressor
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.model_selection import train_test_split
@@ -16,16 +20,9 @@ from ta.trend import MACD
 import lightgbm as lgb
 from xgboost import XGBRegressor
 from tqdm import tqdm
-import mplfinance as mpf
-from keras.models import Sequential
-from keras.layers import LSTM, Dense, Dropout
-from keras.callbacks import EarlyStopping, ModelCheckpoint
-from sklearn.experimental import enable_halving_search_cv
-from sklearn.model_selection import HalvingGridSearchCV
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.feature_selection import SelectFromModel
-from sklearn.linear_model import Lasso
 from tabulate import tabulate
 from fpdf import FPDF
 import logging
@@ -65,7 +62,7 @@ def read_and_prepare_data(filepath):
     for col in ['close', 'RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'SMA_3', 'SMA_7']:
         df[f'Lag_{col}'] = df[col].shift(1)
 
-        # 创建时间特征
+    # 创建时间特征
     df['Minute'] = df.index.minute
     df['Hour'] = df.index.hour
     df['DayOfWeek'] = df.index.dayofweek
@@ -74,16 +71,22 @@ def read_and_prepare_data(filepath):
     df['Price_Change'] = df['close'].shift(-1) - df['close']
     df['Direction'] = (df['Price_Change'] > 0).astype(int)  # 1表示涨，0表示跌
 
+    # 确认标签数据的分布
+    print(df['Price_Change'].describe())
+    print(df['Direction'].value_counts())
+
     # 删除缺失值
     df.dropna(inplace=True)
     logger.info("Data preparation completed")
-
     return df
 
+# 读取并处理数据
 data = read_and_prepare_data('../BTC_USDT_ohlcv_data.parquet')
 
 # 准备特征和标签
-features = ['RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'SMA_3', 'SMA_7', 'Lag_close', 'Lag_RSI', 'Lag_ATR', 'Lag_MACD', 'Lag_BB_High', 'Lag_BB_Low', 'Lag_SMA_3', 'Lag_SMA_7', 'Hour', 'DayOfWeek']
+features = ['RSI', 'ATR', 'MACD', 'BB_High', 'BB_Low', 'SMA_3', 'SMA_7',
+            'Lag_close', 'Lag_RSI', 'Lag_ATR', 'Lag_MACD', 'Lag_BB_High',
+            'Lag_BB_Low', 'Lag_SMA_3', 'Lag_SMA_7', 'Hour', 'DayOfWeek']
 X = data[features]
 y = data['Price_Change']
 direction = data['Direction']
@@ -109,7 +112,6 @@ logger.info("Splitting data...")
 X_train, X_test, y_train, y_test = train_test_split(X_balanced, y_balanced, test_size=0.2, random_state=42)
 
 y_train_direction = (y_train > 0).astype(int)
-
 y_test_direction = (y_test > 0).astype(int)
 
 # 无监督学习特征提取
@@ -127,7 +129,7 @@ X_test_pca = pca.transform(X_test)
 X_train = np.hstack((X_train, X_train_cluster.reshape(-1, 1), X_train_pca))
 X_test = np.hstack((X_test, X_test_cluster.reshape(-1, 1), X_test_pca))
 
-# 标准化特征
+# 再次标准化添加特征后的数据
 scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
@@ -138,6 +140,13 @@ lasso.fit(X_train, y_train)
 model = SelectFromModel(lasso, prefit=True)
 X_train_selected = model.transform(X_train)
 X_test_selected = model.transform(X_test)
+
+# 获取被选择的特征掩码（布尔数组，True 表示被选择的特征）
+selected_features_mask = model.get_support()
+
+# 获取选择的特征名称
+final_features = [feature for feature, selected in zip(features + ['cluster', 'pca1', 'pca2', 'pca3', 'pca4', 'pca5'], selected_features_mask) if selected]
+print("Selected Features:", final_features)
 
 # 训练基础模型
 models = {
@@ -180,7 +189,12 @@ for name, model in tqdm(models.items(), desc="Training models"):
         trained_models[name] = model
         logger.info("%s model training completed", name)
 
-# 使用基础模型的预测准确率作为新特征
+    # 保存基础模型
+    joblib.dump(model, f'{name.lower().replace(" ", "_")}_model.pkl')
+    logger.info("%s model saved successfully", name)
+
+# -----------------------------------------------堆叠集成模型---------------------------------------------------------
+# 使用基础模型的预测作为新特征
 X_train_meta = pd.DataFrame(X_train_selected).copy()
 X_test_meta = pd.DataFrame(X_test_selected).copy()
 
@@ -198,10 +212,13 @@ scaler_meta = StandardScaler()
 X_train_meta = scaler_meta.fit_transform(X_train_meta)
 X_test_meta = scaler_meta.transform(X_test_meta)
 
-# 使用新的特征进行再训练
-meta_model = RandomForestRegressor(random_state=42, n_jobs=-1)
-meta_model.fit(X_train_meta, y_train)
-logger.info("Meta model training completed")
+# 使用新的特征进行堆叠集成再训练
+stacking_model = StackingRegressor(
+    estimators=[(name, model) for name, model in trained_models.items()],
+    final_estimator=RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+)
+stacking_model.fit(X_train_meta, y_train)
+logger.info("Stacking model training completed")
 
 # 评估模型函数
 def evaluate_model(model, X_test, y_test, y_test_direction):
@@ -228,6 +245,19 @@ def evaluate_model(model, X_test, y_test, y_test_direction):
 
     return y_pred, results
 
+# 保存模型
+def save_model(model, model_path):
+    logger.info(f"Saving {model.__class__.__name__} model...")
+    joblib.dump(model, model_path)
+    # 检查文件是否存在
+    if Path(model_path).exists():
+        logger.info(f"Model successfully saved to {model_path}")
+    else:
+        logger.error(f"Failed to save the model to {model_path}")
+
+# 保存堆叠集成模型
+save_model(stacking_model, '../stacking_model.pkl')
+
 # 评估所有模型并保存结果
 results_dict = {}
 for name, model in trained_models.items():
@@ -235,9 +265,9 @@ for name, model in trained_models.items():
     _, results = evaluate_model(model, X_test_selected, y_test, y_test_direction)
     results_dict[name] = results
 
-logger.info("Evaluating Meta Model:")
-_, results = evaluate_model(meta_model, X_test_meta, y_test, y_test_direction)
-results_dict['Meta Model'] = results
+logger.info("Evaluating Stacking Model:")
+_, results = evaluate_model(stacking_model, X_test_meta, y_test, y_test_direction)
+results_dict['Stacking Model'] = results
 
 # 将评估结果保存为DataFrame
 results_df = pd.DataFrame(results_dict).T
@@ -273,7 +303,11 @@ pdf = PDF()
 pdf.add_page()
 pdf.chapter_title('Model Evaluation Results')
 pdf.chapter_body(table)
-pdf.output('model_evaluation_results.pdf')
+
+# 获取当前日期和时间
+now = datetime.now()
+date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
+pdf.output(f'{date_time_str}_model_evaluation_results.pdf')
 
 # 显示评估结果表
 print(results_df)

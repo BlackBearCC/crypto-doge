@@ -80,7 +80,6 @@ def read_and_combine_csv(directory):
 
 
 
-
 # 归一化函数
 def normalize(predicted_change, min_value, max_value):
     normalized_value = 2 * (predicted_change - min_value) / (max_value - min_value) - 1
@@ -96,7 +95,7 @@ def dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold,
 
     return buy_threshold, sell_threshold
 
-# 定义多时间框架RSI策略
+
 class MultiTimeFrameRSIStrategy(bt.Strategy):
     params = (
         ('rsi1_length', 14),
@@ -115,18 +114,18 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
     )
 
     def __init__(self):
+        # 初始化技术指标
         self.rsi_5m = bt.indicators.RSI(self.datas[0].close, period=self.params.rsi1_length)
         self.rsi_15m = bt.indicators.RSI(self.datas[1].close, period=self.params.rsi2_length)
         self.rsi_30m = bt.indicators.RSI(self.datas[2].close, period=self.params.rsi3_length)
         self.atr = bt.indicators.ATR(self.datas[0], period=self.params.atr_length)
         self.long_term_ma = bt.indicators.SMA(self.datas[0].close, period=100)
-
         self.bollinger = bt.indicators.BollingerBands(self.datas[0].close, period=20)
         self.ema = bt.indicators.EMA(self.datas[0].close, period=20)
         self.macd = bt.indicators.MACDHisto(self.datas[0].close)
         self.stochastic = bt.indicators.Stochastic(self.datas[0], period=14)
 
-        self.model = joblib.load('ensemble_model.pkl')
+        self.model = joblib.load('meta_model.pkl')
 
         self.buy_cooldown = 0
         self.sell_cooldown = 0
@@ -165,17 +164,68 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         macd_value = self.macd.macd[0]
         stochastic_value = self.stochastic.percK[0]
 
-        feature_names = ['RSI', 'ATR', 'SMA', 'EMA', 'MACD', 'Stochastic', 'Bollinger_High', 'Bollinger_Low']
-        input_data = pd.DataFrame([[rsi_average, atr_value, sma_value, bollinger_high, bollinger_low, ema_value, macd_value, stochastic_value]], columns=feature_names)
+        bollinger_high = self.bollinger.lines.top[0]
+        bollinger_low = self.bollinger.lines.bot[0]
+        ema_value = self.ema[0]
+        macd_value = self.macd.macd[0]
+        stochastic_value = self.stochastic.percK[0]
+
+        # 计算滞后特征
+        lag_close = self.datas[0].close[-1] if len(self.datas[0].close) > 1 else current_price
+        lag_rsi = rsi_average
+        lag_atr = atr_value
+        lag_macd = macd_value
+        lag_bb_high = bollinger_high
+        lag_bb_low = bollinger_low
+        lag_sma_3 = sum([self.datas[0].close[-i] for i in range(1, 4)]) / 3 if len(
+            self.datas[0].close) > 3 else sma_value
+        lag_sma_7 = sum([self.datas[0].close[-i] for i in range(1, 8)]) / 7 if len(
+            self.datas[0].close) > 7 else sma_value
+
+        # 时间特征
+        minute = self.datas[0].datetime.datetime(0).minute
+        hour = self.datas[0].datetime.datetime(0).hour
+        day_of_week = self.datas[0].datetime.datetime(0).weekday()
+
+        #22特征版本
+        # # Ensure all features are floats and construct input data
+        # input_data = np.array([[
+        #     float(rsi_average), float(atr_value), float(macd_value), float(bollinger_high), float(bollinger_low),
+        #     float(self.ema[0]), float(self.long_term_ma[0]),
+        #     float(lag_close), float(lag_rsi), float(lag_atr), float(lag_macd), float(lag_bb_high), float(lag_bb_low),
+        #     float(lag_sma_3), float(lag_sma_7),
+        #     float(minute), float(hour), float(day_of_week),
+        #     float(self.datas[0].close[-2] if len(self.datas[0].close) > 2 else current_price),
+        #     float(self.datas[0].close[-3] if len(self.datas[0].close) > 3 else current_price),
+        #     float(self.datas[0].close[-4] if len(self.datas[0].close) > 4 else current_price),
+        #     float(self.datas[0].close[-5] if len(self.datas[0].close) > 5 else current_price)
+        # ]], dtype=float)
+
+        ##11特征版本
+        input_data = np.array([[
+            float(rsi_average), float(atr_value), float(macd_value), float(bollinger_high), float(bollinger_low),
+            float(self.ema[0]), float(self.long_term_ma[0]),
+            float(lag_close), float(lag_rsi), float(lag_atr), float(lag_macd)
+        ]], dtype=float)
+
+        print(input_data)
+
         predicted_change = self.model.predict(input_data)[0]
+
+        # 计算预测方向
+        predicted_direction = 'UP' if predicted_change > 0 else 'DOWN'
 
         base_buy_threshold = self.params.base_buy_threshold
         base_sell_threshold = self.params.base_sell_threshold
 
-        buy_threshold, sell_threshold = dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold, self.params.min_predicted_change, self.params.max_predicted_change)
+        buy_threshold, sell_threshold = dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold,
+                                                          self.params.min_predicted_change,
+                                                          self.params.max_predicted_change)
 
         predicted_price = current_price + predicted_change
         self.predicted_price_line[0] = predicted_price
+        self.log(
+            f'CURRENT_PRICE: {current_price:.2f}, PREDICTED_PRICE: {predicted_price:.2f}, PREDICTED_CHANGE: {predicted_change:.2f}, PREDICTED_DIRECTION: {predicted_direction}')
 
         if (self.rsi_5m[0] < buy_threshold and self.rsi_15m[0] < buy_threshold and self.rsi_30m[0] < buy_threshold and
                 rsi_average < buy_threshold and self.buy_cooldown == 0):
@@ -187,9 +237,11 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
             take_profit_price = current_price + atr_value * self.params.atr_multiplier
             self.sell(exectype=bt.Order.Stop, price=stop_price)
             self.sell(exectype=bt.Order.Limit, price=take_profit_price)
-            self.log(f'BUY , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f},PREDICTED_PRICE: {predicted_price:.2f},BUY_THRESHOLD: {buy_threshold:.2f},SELL_THRESHOLD: {sell_threshold:.2f}')
+            # self.log(
+            #     f'BUY , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f},PREDICTED_PRICE: {predicted_price:.2f},BUY_THRESHOLD: {buy_threshold:.2f},SELL_THRESHOLD: {sell_threshold:.2f}')
 
-        elif (self.rsi_5m[0] > sell_threshold and self.rsi_15m[0] > sell_threshold and self.rsi_30m[0] > sell_threshold and
+        elif (self.rsi_5m[0] > sell_threshold and self.rsi_15m[0] > sell_threshold and self.rsi_30m[
+            0] > sell_threshold and
               rsi_average > sell_threshold and self.sell_cooldown == 0):
             if self.position.size > 0:
                 self.close()
@@ -199,7 +251,8 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
             take_profit_price = current_price - atr_value * self.params.atr_multiplier
             self.buy(exectype=bt.Order.Stop, price=stop_price)
             self.buy(exectype=bt.Order.Limit, price=take_profit_price)
-            self.log(f'SELL , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f},PREDICTED_PRICE: {predicted_price:.2f},BUY_THRESHOLD: {buy_threshold:.2f},SELL_THRESHOLD: {sell_threshold:.2f}')
+            # self.log(
+            #     f'SELL , {current_price:.2f}, SIZE: {size:.2f}, STOP: {stop_price:.2f}, LIMIT: {take_profit_price:.2f},PREDICTED_PRICE: {predicted_price:.2f},BUY_THRESHOLD: {buy_threshold:.2f},SELL_THRESHOLD: {sell_threshold:.2f}')
 
     def stop(self):
         self.trade_info['总交易数'] = self.analyzers.trade_analyzer.get_analysis().total.closed
