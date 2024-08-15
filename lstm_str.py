@@ -30,6 +30,7 @@ class MyLSTMStrategy(bt.Strategy):
         self.portfolio_value = []
         self.data_history = []
         self.trades = []  # 存储每笔交易的详情
+        self.predicted_prices = []  # 用于存储预测的收盘价
 
     def next(self):
         # 收集当前的数据点
@@ -59,6 +60,9 @@ class MyLSTMStrategy(bt.Strategy):
         prediction = self.modelnn.predict(input_data[np.newaxis, :, :])
         predicted_close_price_scaled = prediction[0, -1]
         predicted_close_price = self.minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
+
+        # 保存预测结果
+        self.predicted_prices.append(predicted_close_price)
 
         # 打印调试信息
         print(f"模型的原始预测结果（归一化）: {predicted_close_price_scaled}")
@@ -160,6 +164,15 @@ class MyLSTMStrategy(bt.Strategy):
         plt.plot(self.states_buy, [self.data_history[i]['close'] for i in self.states_buy], '^', markersize=10, color='m', label='buying signal')
         plt.plot(self.states_sell, [self.data_history[i]['close'] for i in self.states_sell], 'v', markersize=10, color='k', label='selling signal')
         plt.title(f'Trading Signals with Max Drawdown: {max_drawdown * 100:.2f}%')
+        plt.legend()
+        plt.show()
+
+        # 绘制预测收盘价和实际收盘价的对比图
+        plt.figure(figsize=(15, 5))
+        actual_prices = [d['close'] for d in self.data_history[self.params.timestamp - 1:]]  # 跳过前面的无效预测
+        plt.plot(actual_prices, color='blue', lw=2, label='Actual Close Price')
+        plt.plot(self.predicted_prices, color='orange', lw=2, label='Predicted Close Price')
+        plt.title('Predicted vs Actual Close Prices')
         plt.legend()
         plt.show()
 # 加载数据并初始化策略
