@@ -181,11 +181,17 @@ class MyLSTMStrategy(bt.Strategy):
         plt.legend()
         plt.show()
 
+        # 确保索引不越界
+        valid_buy_indices = [i for i in self.states_buy if i < len(self.data_history)]
+        valid_sell_indices = [i for i in self.states_sell if i < len(self.data_history)]
+
         # 绘制买入卖出信号
         plt.figure(figsize=(15, 5))
         plt.plot([d['close'] for d in self.data_history], color='r', lw=2., label='Close Price')
-        plt.plot(self.states_buy, [self.data_history[i]['close'] for i in self.states_buy], '^', markersize=10, color='m', label='buying signal')
-        plt.plot(self.states_sell, [self.data_history[i]['close'] for i in self.states_sell], 'v', markersize=10, color='k', label='selling signal')
+        plt.plot(valid_buy_indices, [self.data_history[i]['close'] for i in valid_buy_indices], '^', markersize=10,
+                 color='m', label='buying signal')
+        plt.plot(valid_sell_indices, [self.data_history[i]['close'] for i in valid_sell_indices], 'v', markersize=10,
+                 color='k', label='selling signal')
         plt.title(f'Trading Signals with Max Drawdown: {max_drawdown * 100:.2f}%')
         plt.legend()
         plt.show()
@@ -216,6 +222,31 @@ class MyLSTMStrategy(bt.Strategy):
                 plt.axvspan(start_index, end_index, color='yellow', alpha=0.3, label='Sideways' if i == 0 else "")
 
         plt.title('Predicted Trend vs Actual Price')
+        plt.legend()
+        plt.show()
+
+        # 基于已有数据预测未来48天的价格
+        future_predictions = []
+        last_data = [d['close'] for d in self.data_history[-self.params.timestamp:]]
+        for _ in range(48):
+            last_data_scaled = self.minmax.transform(np.array(last_data).reshape(-1, 1)).flatten()
+            input_data = np.column_stack((np.zeros(self.params.timestamp),
+                                          np.zeros(self.params.timestamp),
+                                          np.zeros(self.params.timestamp),
+                                          last_data_scaled))
+            prediction = self.modelnn.predict(input_data[np.newaxis, :, :])
+            predicted_close_price_scaled = prediction[0, -1]
+            predicted_close_price = self.minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
+            future_predictions.append(predicted_close_price)
+            last_data = last_data[1:] + [predicted_close_price]  # 滑动窗口更新
+
+        # 绘制完整价格线
+        plt.figure(figsize=(15, 5))
+        actual_prices = [d['close'] for d in self.data_history]
+        plt.plot(actual_prices, color='blue', lw=2, label='Actual Price')
+        plt.plot(range(len(actual_prices), len(actual_prices) + 48), future_predictions, color='orange', lw=2,
+                 label='Future Prediction (48 days)')
+        plt.title('Complete Price Line with Future Predictions')
         plt.legend()
         plt.show()
 
