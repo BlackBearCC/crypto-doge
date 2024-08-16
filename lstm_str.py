@@ -1,4 +1,6 @@
 import os
+from datetime import timedelta
+
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -137,6 +139,7 @@ class MyLSTMStrategy(bt.Strategy):
         # 更新投资组合的总价值
         self.portfolio_value.append(self.broker.get_value())
 
+
     def stop(self):
         # 打印最终投资组合价值
         final_value = self.broker.get_value()
@@ -225,29 +228,74 @@ class MyLSTMStrategy(bt.Strategy):
         plt.legend()
         plt.show()
 
-        # 基于已有数据预测未来48天的价格
-        future_predictions = []
-        last_data = [d['close'] for d in self.data_history[-self.params.timestamp:]]
-        for _ in range(48):
-            last_data_scaled = self.minmax.transform(np.array(last_data).reshape(-1, 1)).flatten()
-            input_data = np.column_stack((np.zeros(self.params.timestamp),
-                                          np.zeros(self.params.timestamp),
-                                          np.zeros(self.params.timestamp),
-                                          last_data_scaled))
-            prediction = self.modelnn.predict(input_data[np.newaxis, :, :])
-            predicted_close_price_scaled = prediction[0, -1]
-            predicted_close_price = self.minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
-            future_predictions.append(predicted_close_price)
-            last_data = last_data[1:] + [predicted_close_price]  # 滑动窗口更新
+        def predict_future(future_days, last_data, modelnn, minmax, timestamp):
+            # 初始化 future_predictions 列表，用于存储未来的预测值
+            future_predictions = []
 
-        # 绘制完整价格线
-        plt.figure(figsize=(15, 5))
-        actual_prices = [d['close'] for d in self.data_history]
-        plt.plot(actual_prices, color='blue', lw=2, label='Actual Price')
-        plt.plot(range(len(actual_prices), len(actual_prices) + 48), future_predictions, color='orange', lw=2,
-                 label='Future Prediction (48 days)')
-        plt.title('Complete Price Line with Future Predictions')
-        plt.legend()
+            # 使用最后 timestamp 天的 close_price 数据
+            close_price = last_data[-timestamp:]
+
+            # 对最近的 close_price 进行归一化处理
+            close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
+
+            for _ in range(future_days):
+                # 准备输入数据，假设 Polarity, Sensitivity, Tweet_vol 为 0
+                input_data = np.column_stack((np.zeros(timestamp),
+                                              np.zeros(timestamp),
+                                              np.zeros(timestamp),
+                                              close_price_scaled))
+
+                # 预测
+                prediction = modelnn.predict(input_data[np.newaxis, :, :])
+                predicted_close_price_scaled = prediction[0, -1]
+
+                # 将预测结果反归一化为实际价格
+                predicted_close_price = minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
+
+                # 保存预测结果
+                future_predictions.append(predicted_close_price)
+
+                # 更新 close_price_scaled，保持与实际情况一致
+                close_price = np.append(close_price[1:], predicted_close_price)
+                close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
+
+            return future_predictions
+
+            # 使用最后的历史数据作为输入
+
+            # 打印数据历史长度和 datetime 索引范围
+
+            # 使用最后的历史数据作为输入
+
+        # 设置要预测的未来小时数
+        future_hours = 36  # 预测未来的小时数
+
+        # 使用最后的历史数据作为输入
+        last_data = [d['close'] for d in self.data_history]
+
+        # 使用新逻辑预测未来小时数的价格
+        future_predictions = predict_future(future_hours, last_data, self.modelnn, self.minmax, self.params.timestamp)
+        print(f"未来{future_hours}小时的预测价格: {future_predictions}")
+
+        # 获取最后一个有效的时间点
+        last_datetime = self.datas[0].datetime.datetime(-1)
+        print(f"最后一个时间点: {last_datetime}")
+
+        # 获取未来的时间轴（小时级别）
+        future_datetimes = pd.date_range(last_datetime + timedelta(hours=1), periods=future_hours, freq='H')
+        print(f"未来的时间范围: {future_datetimes}")
+
+        # 仅绘制预测的部分
+        plt.figure(figsize=(15, 7))
+
+        # 绘制未来预测价格
+        plt.plot(future_datetimes, future_predictions, label='Predicted Future Close Price', color='orange')
+
+        # 设置图表标题和标签
+        plt.title('Predicted Future Prices for Next 48 Hours')
+        plt.xlabel('Time')
+        plt.ylabel('Price')
+        # plt.legend()
         plt.show()
 
 # 加载数据并初始化策略
