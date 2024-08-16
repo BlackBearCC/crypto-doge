@@ -1,5 +1,4 @@
 import os
-
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -16,6 +15,7 @@ class MyLSTMStrategy(bt.Strategy):
         ('max_sell', 10),
         ('stop_loss', 0.03),
         ('take_profit', 0.07),
+        ('trend_window', 48),  # 预测窗口调整为7天
     )
 
     def __init__(self):
@@ -31,6 +31,21 @@ class MyLSTMStrategy(bt.Strategy):
         self.data_history = []
         self.trades = []  # 存储每笔交易的详情
         self.predicted_prices = []  # 用于存储预测的收盘价
+        self.trend_list = []  # 用于存储每个预测窗口的趋势
+        self.market_states = []  # 用于存储每个预测窗口的市场状态
+
+    def calculate_trend(self, prices):
+        x = np.arange(len(prices))
+        slope = np.polyfit(x, prices, 1)[0]
+        return slope
+
+    def classify_market(self, trend, threshold=0.01):
+        if trend > threshold:
+            return 'uptrend'
+        elif trend < -threshold:
+            return 'downtrend'
+        else:
+            return 'sideways'
 
     def next(self):
         # 收集当前的数据点
@@ -41,7 +56,7 @@ class MyLSTMStrategy(bt.Strategy):
             'volume': self.data.volume[0]
         })
 
-        if len(self.data_history) < self.params.timestamp:
+        if len(self.data_history) < self.params.timestamp + 14:
             return
 
         # 计算模型所需的特征
@@ -63,6 +78,14 @@ class MyLSTMStrategy(bt.Strategy):
 
         # 保存预测结果
         self.predicted_prices.append(predicted_close_price)
+
+        # 在每个固定时间点（例如每小时）进行预测，并绘制趋势
+        if len(self.predicted_prices) >= self.params.trend_window:
+            future_prices = self.predicted_prices[-self.params.trend_window:]
+            trend = self.calculate_trend(future_prices)
+            market_state = self.classify_market(trend)
+            self.trend_list.append(trend)
+            self.market_states.append(market_state)
 
         # 打印调试信息
         print(f"模型的原始预测结果（归一化）: {predicted_close_price_scaled}")
@@ -92,9 +115,9 @@ class MyLSTMStrategy(bt.Strategy):
             self.states_sell.append(len(self.data_history))
             self.trades.append({
                 'type': 'sell',
-                'price': self.data.close[0],
-                'size': sell_units,
-                'datetime': self.datas[0].datetime.datetime(0)
+                    'price': self.data.close[0],
+                    'size': sell_units,
+                    'datetime': self.datas[0].datetime.datetime(0)
             })
             print(f"执行卖出操作: {sell_units:.6f} 单位，价格为 {self.data.close[0]:.2f}, 持仓 {self.current_inventory:.6f}")
 
@@ -175,6 +198,27 @@ class MyLSTMStrategy(bt.Strategy):
         plt.title('Predicted vs Actual Close Prices')
         plt.legend()
         plt.show()
+
+        # 绘制预测趋势与实际价格的对比图
+        plt.figure(figsize=(15, 5))
+        plt.plot([d['close'] for d in self.data_history], color='blue', lw=2, label='Actual Price')
+
+        # 添加趋势区域
+        for i, state in enumerate(self.market_states):
+            start_index = i + self.params.timestamp  # 正确的开始索引
+            end_index = start_index + self.params.trend_window  # 趋势区域的结束索引
+
+            if state == 'uptrend':
+                plt.axvspan(start_index, end_index, color='green', alpha=0.3, label='Uptrend' if i == 0 else "")
+            elif state == 'downtrend':
+                plt.axvspan(start_index, end_index, color='red', alpha=0.3, label='Downtrend' if i == 0 else "")
+            else:
+                plt.axvspan(start_index, end_index, color='yellow', alpha=0.3, label='Sideways' if i == 0 else "")
+
+        plt.title('Predicted Trend vs Actual Price')
+        plt.legend()
+        plt.show()
+
 # 加载数据并初始化策略
 folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
 df_list = []
@@ -196,7 +240,6 @@ df_resampled = pd.concat(df_list)
 # 归一化只对 close 进行
 # 使用 numpy 数组拟合 MinMaxScaler 而不是带有列名的 DataFrame
 minmax = MinMaxScaler().fit(df_resampled[['close']].to_numpy().astype('float32'))
-
 
 # 打印数据预览
 print("数据预览:\n", df_resampled.head())
