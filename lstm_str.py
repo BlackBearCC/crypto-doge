@@ -237,7 +237,7 @@ class MyLSTMStrategy(bt.Strategy):
             peaks = self.peaks_all[i]
             valleys = self.valleys_all[i]
 
-            plt.plot(future_datetimes, future_prices, label=f'Predicted Prices - Segment {i + 1}', color='orange')
+            plt.plot(future_datetimes, future_prices, color='orange')
             plt.plot(future_datetimes[peaks], np.array(future_prices)[peaks], "x", color='green',
                      label='Peaks' if i == 0 else "")
             plt.plot(future_datetimes[valleys], np.array(future_prices)[valleys], "o", color='red',
