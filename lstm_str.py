@@ -158,7 +158,9 @@ class MyLSTMStrategy(bt.Strategy):
 
                     buy_price = self.data.close[-(self.params.trend_window - valleys[i])]
                     sell_price = self.data.close[-(self.params.trend_window - peaks[i])]
-
+                    # 过滤条件：差价大于500点
+                    if abs(sell_price - buy_price) < 800:
+                        continue  # 如果差价小于500点，跳过这次交易
                     print(
                         f"波谷时间: {self.data.datetime.datetime(-self.params.trend_window + valleys[i])}, 波谷预测价格: {future_prices[valleys[i]]}, 实际价格: {buy_price}")
                     print(
