@@ -25,11 +25,11 @@ class MyLSTMStrategy(bt.Strategy):
         print("模型已加载:", self.params.model_path)
 
         self.minmax = MinMaxScaler()
-        self.initial_money = self.params.initial_money
+        self.cash = self.params.initial_money
         self.current_inventory = 0
         self.states_buy = []
         self.states_sell = []
-        self.portfolio_value = []
+        self.portfolio_value = [self.cash]
         self.data_history = []
         self.trades = []  # 存储每笔交易的详情
         self.predicted_prices = []  # 用于存储预测的收盘价
@@ -44,6 +44,7 @@ class MyLSTMStrategy(bt.Strategy):
         self.processed_trades = set()  # 存储已处理的波谷-波峰对
 
         self.order = None
+
     def predict_future(self, future_hours, last_data, modelnn, minmax, timestamp):
         future_predictions = []
 
@@ -85,7 +86,7 @@ class MyLSTMStrategy(bt.Strategy):
 
         # 如果没有找到波峰或波谷，假设为平稳趋势
         if len(peaks) == 0 and len(valleys) == 0:
-            return trends
+            return trends, peaks, valleys
 
         # 将波峰和波谷的位置整合，并按顺序排列
         trend_points = sorted(peaks.tolist() + valleys.tolist())
@@ -163,9 +164,9 @@ class MyLSTMStrategy(bt.Strategy):
                     print(
                         f"波峰时间: {self.data.datetime.datetime(-self.params.trend_window + peaks[i])}, 波峰预测价格: {future_prices[peaks[i]]}, 实际价格: {sell_price}")
 
-                    if self.current_inventory == 0 and self.broker.get_cash() >= self.params.buy_amount:
+                    if self.current_inventory == 0 and self.cash >= self.params.buy_amount:
                         buy_units = self.params.buy_amount / buy_price
-                        self.buy(size=buy_units)
+                        self.cash -= self.params.buy_amount
                         self.current_inventory += buy_units
                         self.states_buy.append(actual_valley_index)
                         print(
@@ -181,7 +182,7 @@ class MyLSTMStrategy(bt.Strategy):
 
                     if self.current_inventory > 0 and actual_peak_index > actual_valley_index:
                         sell_units = min(self.current_inventory, self.params.max_sell)
-                        self.sell(size=sell_units)
+                        self.cash += sell_units * sell_price
                         self.current_inventory -= sell_units
                         self.states_sell.append(actual_peak_index)
                         print(
@@ -204,28 +205,45 @@ class MyLSTMStrategy(bt.Strategy):
                     # 完成一笔交易后退出循环
                     break
 
-        # # 判断当前的买入或卖出信号
-        # if len(self.trend_list) > 0 and self.trend_list[-1][-1] == 'uptrend':
-        #     if self.broker.get_cash() >= self.params.buy_amount:
-        #         buy_units = self.params.buy_amount / self.data.close[0]
-        #         self.buy(size=buy_units)
-        #         self.current_inventory += buy_units
-        #         self.states_buy.append(len(self.data_history))
-        #         print(f"执行买入操作: {buy_units:.6f} 单位，价格为 {self.data.close[0]:.2f}, 持仓 {self.current_inventory:.6f}")
-        # elif len(self.trend_list) > 0 and self.trend_list[-1][-1] == 'downtrend' and self.current_inventory > 0:
-        #     sell_units = min(self.current_inventory, self.params.max_sell)
-        #     self.sell(size=sell_units)
-        #     self.current_inventory -= sell_units
-        #     self.states_sell.append(len(self.data_history))
-        #     print(f"执行卖出操作: {sell_units:.6f} 单位，价格为 {self.data.close[0]:.2f}, 持仓 {self.current_inventory:.6f}")
-
         # 更新投资组合的总价值
-        self.portfolio_value.append(self.broker.get_value())
+        portfolio_value = self.cash + self.current_inventory * self.data.close[0]
+        self.portfolio_value.append(portfolio_value)
 
     def stop(self):
         # 打印最终投资组合价值
-        final_value = self.broker.get_value()
+        final_value = self.portfolio_value[-1]
         print(f"最终资金: {final_value:.2f}")
+
+        # 基于已有数据预测未来24H的价格
+        future_predictions = []
+        last_data = [d['close'] for d in self.data_history[-self.params.timestamp:]]
+        last_datetime = self.datas[0].datetime.datetime(-1)  # 获取当前数据的最后一个时间点
+        for i  in range(24):
+            last_data_scaled = self.minmax.transform(np.array(last_data).reshape(-1, 1)).flatten()
+            input_data = np.column_stack((np.zeros(self.params.timestamp),
+                                          np.zeros(self.params.timestamp),
+                                          np.zeros(self.params.timestamp),
+                                          last_data_scaled))
+            prediction = self.modelnn.predict(input_data[np.newaxis, :, :])
+            predicted_close_price_scaled = prediction[0, -1]
+            predicted_close_price = self.minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
+            future_predictions.append(predicted_close_price)
+
+            # 计算预测时间
+            predicted_time = last_datetime + timedelta(hours=i + 1)
+            print(f"预测价格: {predicted_close_price:.2f}, 预测时间: {predicted_time}")
+
+            last_data = last_data[1:] + [predicted_close_price]  # 滑动窗口更新
+
+        # 绘制完整价格线
+        plt.figure(figsize=(15, 5))
+        actual_prices = [d['close'] for d in self.data_history]
+        plt.plot(actual_prices, color='blue', lw=2, label='Actual Price')
+        plt.plot(range(len(actual_prices), len(actual_prices) + 24), future_predictions, color='orange', lw=2,
+                 label='Future Prediction (24 H)')
+        plt.title('Complete Price Line with Future Predictions')
+        plt.legend()
+        plt.show()
 
         # 计算最大回撤
         portfolio_value = np.array(self.portfolio_value)
@@ -236,8 +254,8 @@ class MyLSTMStrategy(bt.Strategy):
         print(f"最大回撤: {max_drawdown * 100:.2f}%")
 
         # 计算胜率和总盈利
-        total_trades = len(self.states_sell)
-        win_trades = sum([1 for i in range(1, total_trades) if self.states_sell[i] > self.states_buy[i - 1]])
+        total_trades = len(self.trades) // 2
+        win_trades = sum([1 for i in range(1, len(self.trades), 2) if self.trades[i]['price'] > self.trades[i - 1]['price']])
         win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
         total_gains = final_value - self.params.initial_money
         invest_return = (total_gains / self.params.initial_money) * 100
@@ -328,6 +346,23 @@ class MyLSTMStrategy(bt.Strategy):
         plt.legend()
         plt.show()
 
+        # 打印最终资金和持仓
+        print(f"最终资金: {self.cash:.2f}")
+        if self.current_inventory > 0:
+            print(f"最终持仓: {self.current_inventory:.6f} 单位，当前价格: {self.data.close[0]:.2f}")
+
+        # 计算交易结果
+        total_profit = 0
+        for i in range(1, len(self.trades), 2):
+            buy_trade = self.trades[i - 1]
+            sell_trade = self.trades[i]
+            if buy_trade['action'] == 'buy' and sell_trade['action'] == 'sell':
+                profit = (sell_trade['price'] - buy_trade['price']) * buy_trade['size']
+                total_profit += profit
+                print(f"交易 {i // 2 + 1}: 买入价格 {buy_trade['price']:.2f}，卖出价格 {sell_trade['price']:.2f}，利润 {profit:.2f}")
+
+        print(f"总利润: {total_profit:.2f}")
+
 # 加载数据并初始化策略
 folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
 df_list = []
@@ -361,29 +396,7 @@ cerebro.addstrategy(MyLSTMStrategy)
 cerebro.broker.setcash(10000.0)
 cerebro.broker.setcommission(commission=0.001)
 
-cerebro.addanalyzer(btanalyzers.SharpeRatio, _name='sharpe')
-cerebro.addanalyzer(btanalyzers.DrawDown, _name='drawdown')
-cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name='trade_analyzer')
 
-results = cerebro.run()
-
-# 获取分析器结果
-strategy = results[0]
-sharpe_ratio = strategy.analyzers.sharpe.get_analysis()
-drawdown = strategy.analyzers.drawdown.get_analysis()
-trade_analyzer = strategy.analyzers.trade_analyzer.get_analysis()
+cerebro.run()
 
 
-print('最大回撤:', drawdown)
-print('交易分析:', trade_analyzer)
-print(f"最大回撤: {drawdown.max.drawdown:.2f}%")
-
-# 交易分析
-print(f"总交易数: {trade_analyzer.total.closed}")
-print(f"胜率: {trade_analyzer.won.total / trade_analyzer.total.closed * 100:.2f}%")
-print(f"平均盈利: {trade_analyzer.won.pnl.average:.2f}")
-print(f"平均亏损: {trade_analyzer.lost.pnl.average:.2f}")
-
-# 运行回测
-print('初始资金: %.2f' % cerebro.broker.getvalue())
-print('结束资金: %.2f' % cerebro.broker.getvalue())
