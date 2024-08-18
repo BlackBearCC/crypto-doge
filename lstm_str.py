@@ -1,12 +1,12 @@
 import os
 from datetime import timedelta
-
 import pandas as pd
 import numpy as np
 import tensorflow as tf
 from sklearn.preprocessing import MinMaxScaler
 import backtrader as bt
 import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
 
 class MyLSTMStrategy(bt.Strategy):
     params = (
@@ -17,7 +17,7 @@ class MyLSTMStrategy(bt.Strategy):
         ('max_sell', 10),
         ('stop_loss', 0.03),
         ('take_profit', 0.07),
-        ('trend_window', 48),  # 预测窗口调整为7天
+        ('trend_window', 48),  # 预测窗口调整为48小时
     )
 
     def __init__(self):
@@ -36,18 +36,66 @@ class MyLSTMStrategy(bt.Strategy):
         self.trend_list = []  # 用于存储每个预测窗口的趋势
         self.market_states = []  # 用于存储每个预测窗口的市场状态
 
-    def calculate_trend(self, prices):
-        x = np.arange(len(prices))
-        slope = np.polyfit(x, prices, 1)[0]
-        return slope
+        self.future_prices_all = []  # 用于存储所有预测的价格数据
+        self.peaks_all = []  # 用于存储所有波峰的位置
+        self.valleys_all = []  # 用于存储所有波谷的位置
+        self.future_datetimes_all = []  # 用于存储每次预测的时间序列
 
-    def classify_market(self, trend, threshold=0.01):
-        if trend > threshold:
-            return 'uptrend'
-        elif trend < -threshold:
-            return 'downtrend'
-        else:
-            return 'sideways'
+    def predict_future(self, future_hours, last_data, modelnn, minmax, timestamp):
+        future_predictions = []
+
+        # 使用最后 timestamp 个时间步的 close_price 数据
+        close_price = last_data[-timestamp:]
+
+        # 对最近的 close_price 进行归一化处理
+        close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
+
+        for _ in range(future_hours):
+            # 准备输入数据
+            input_data = np.column_stack((np.zeros(timestamp),  # 假设 Polarity, Sensitivity, Tweet_vol 为 0
+                                          np.zeros(timestamp),
+                                          np.zeros(timestamp),
+                                          close_price_scaled))
+
+            # 预测
+            prediction = modelnn.predict(input_data[np.newaxis, :, :])
+            predicted_close_price_scaled = prediction[0, -1]
+
+            # 将预测结果反归一化为实际价格
+            predicted_close_price = minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
+
+            # 保存预测结果
+            future_predictions.append(predicted_close_price)
+
+            # 更新 close_price_scaled，保持与实际情况一致
+            close_price = np.append(close_price[1:], predicted_close_price)
+            close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
+
+        return future_predictions
+
+    def identify_trend(self, future_predictions):
+        peaks, _ = find_peaks(future_predictions)
+        valleys, _ = find_peaks(-np.array(future_predictions))
+
+        trend_segments = []
+        trends = ['sideways'] * len(future_predictions)
+
+        # 如果没有找到波峰或波谷，假设为平稳趋势
+        if len(peaks) == 0 and len(valleys) == 0:
+            return trends
+
+        # 将波峰和波谷的位置整合，并按顺序排列
+        trend_points = sorted(peaks.tolist() + valleys.tolist())
+
+        for i in range(1, len(trend_points)):
+            start = trend_points[i - 1]
+            end = trend_points[i]
+            if future_predictions[end] > future_predictions[start]:
+                trends[start:end + 1] = ['uptrend'] * (end - start + 1)
+            else:
+                trends[start:end + 1] = ['downtrend'] * (end - start + 1)
+
+        return trends, peaks, valleys
 
     def next(self):
         # 收集当前的数据点
@@ -81,64 +129,36 @@ class MyLSTMStrategy(bt.Strategy):
         # 保存预测结果
         self.predicted_prices.append(predicted_close_price)
 
-        # 在每个固定时间点（例如每小时）进行预测，并绘制趋势
         if len(self.predicted_prices) >= self.params.trend_window:
             future_prices = self.predicted_prices[-self.params.trend_window:]
-            trend = self.calculate_trend(future_prices)
-            market_state = self.classify_market(trend)
-            self.trend_list.append(trend)
-            self.market_states.append(market_state)
+            trend_segments, peaks, valleys = self.identify_trend(future_prices)
 
-        # 打印调试信息
-        print(f"模型的原始预测结果（归一化）: {predicted_close_price_scaled}")
-        print(f"反归一化后的预测 close 价格: {predicted_close_price}")
-        print(f"当前数据 - close: {self.data.close[0]}, high: {self.data.high[0]}, low: {self.data.low[0]}, volume: {self.data.volume[0]}")
-        print(f"最近的 close_price 序列: {close_price}")
-        print(f"归一化后的 close_price 序列: {close_price_scaled}")
+            # 保存预测的价格和对应的时间序列
+            last_datetime = self.datas[0].datetime.datetime(-1)
+            future_datetimes = pd.date_range(last_datetime + timedelta(hours=1), periods=self.params.trend_window,
+                                             freq='H')
+            self.future_prices_all.append(future_prices)
+            self.peaks_all.append(peaks)
+            self.valleys_all.append(valleys)
+            self.future_datetimes_all.append(future_datetimes)
 
-        # 基于预测的趋势生成信号并执行交易
-        if predicted_close_price > self.data.close[0]:
+        # 判断当前的买入或卖出信号
+        if len(self.trend_list) > 0 and self.trend_list[-1][-1] == 'uptrend':
             if self.broker.get_cash() >= self.params.buy_amount:
                 buy_units = self.params.buy_amount / self.data.close[0]
                 self.buy(size=buy_units)
                 self.current_inventory += buy_units
                 self.states_buy.append(len(self.data_history))
-                self.trades.append({
-                    'type': 'buy',
-                    'price': self.data.close[0],
-                    'size': buy_units,
-                    'datetime': self.datas[0].datetime.datetime(0)
-                })
                 print(f"执行买入操作: {buy_units:.6f} 单位，价格为 {self.data.close[0]:.2f}, 持仓 {self.current_inventory:.6f}")
-        elif predicted_close_price < self.data.close[0] and self.current_inventory > 0:
+        elif len(self.trend_list) > 0 and self.trend_list[-1][-1] == 'downtrend' and self.current_inventory > 0:
             sell_units = min(self.current_inventory, self.params.max_sell)
             self.sell(size=sell_units)
             self.current_inventory -= sell_units
             self.states_sell.append(len(self.data_history))
-            self.trades.append({
-                'type': 'sell',
-                    'price': self.data.close[0],
-                    'size': sell_units,
-                    'datetime': self.datas[0].datetime.datetime(0)
-            })
             print(f"执行卖出操作: {sell_units:.6f} 单位，价格为 {self.data.close[0]:.2f}, 持仓 {self.current_inventory:.6f}")
-
-            # 止盈止损逻辑
-            if (self.data.close[0] >= close_price[-1] * (1 + self.params.take_profit)) or \
-               (self.data.close[0] <= close_price[-1] * (1 - self.params.stop_loss)):
-                self.sell(size=self.current_inventory)
-                self.trades.append({
-                    'type': 'sell',
-                    'price': self.data.close[0],
-                    'size': self.current_inventory,
-                    'datetime': self.datas[0].datetime.datetime(0)
-                })
-                print(f"达到止损/止盈，全部卖出，价格为 {self.data.close[0]:.2f}, 持仓清空")
-                self.current_inventory = 0
 
         # 更新投资组合的总价值
         self.portfolio_value.append(self.broker.get_value())
-
 
     def stop(self):
         # 打印最终投资组合价值
@@ -184,7 +204,6 @@ class MyLSTMStrategy(bt.Strategy):
         plt.legend()
         plt.show()
 
-        # 确保索引不越界
         valid_buy_indices = [i for i in self.states_buy if i < len(self.data_history)]
         valid_sell_indices = [i for i in self.states_sell if i < len(self.data_history)]
 
@@ -208,6 +227,29 @@ class MyLSTMStrategy(bt.Strategy):
         plt.legend()
         plt.show()
 
+        # 绘制未来预测的价格趋势和波峰、波谷
+        plt.figure(figsize=(15, 5))
+
+        # 循环绘制所有收集到的预测价格和波峰、波谷
+        for i in range(len(self.future_prices_all)):
+            future_prices = self.future_prices_all[i]
+            future_datetimes = self.future_datetimes_all[i]
+            peaks = self.peaks_all[i]
+            valleys = self.valleys_all[i]
+
+            plt.plot(future_datetimes, future_prices, label=f'Predicted Prices - Segment {i + 1}', color='orange')
+            plt.plot(future_datetimes[peaks], np.array(future_prices)[peaks], "x", color='green',
+                     label='Peaks' if i == 0 else "")
+            plt.plot(future_datetimes[valleys], np.array(future_prices)[valleys], "o", color='red',
+                     label='Valleys' if i == 0 else "")
+
+        plt.title('Predicted Future Prices with Identified Peaks and Valleys')
+        plt.xlabel('Time')
+        plt.ylabel('Price')
+        plt.legend()
+        plt.show()
+
+
         # 绘制预测趋势与实际价格的对比图
         plt.figure(figsize=(15, 5))
         plt.plot([d['close'] for d in self.data_history], color='blue', lw=2, label='Actual Price')
@@ -226,76 +268,6 @@ class MyLSTMStrategy(bt.Strategy):
 
         plt.title('Predicted Trend vs Actual Price')
         plt.legend()
-        plt.show()
-
-        def predict_future(future_days, last_data, modelnn, minmax, timestamp):
-            # 初始化 future_predictions 列表，用于存储未来的预测值
-            future_predictions = []
-
-            # 使用最后 timestamp 天的 close_price 数据
-            close_price = last_data[-timestamp:]
-
-            # 对最近的 close_price 进行归一化处理
-            close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
-
-            for _ in range(future_days):
-                # 准备输入数据，假设 Polarity, Sensitivity, Tweet_vol 为 0
-                input_data = np.column_stack((np.zeros(timestamp),
-                                              np.zeros(timestamp),
-                                              np.zeros(timestamp),
-                                              close_price_scaled))
-
-                # 预测
-                prediction = modelnn.predict(input_data[np.newaxis, :, :])
-                predicted_close_price_scaled = prediction[0, -1]
-
-                # 将预测结果反归一化为实际价格
-                predicted_close_price = minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
-
-                # 保存预测结果
-                future_predictions.append(predicted_close_price)
-
-                # 更新 close_price_scaled，保持与实际情况一致
-                close_price = np.append(close_price[1:], predicted_close_price)
-                close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
-
-            return future_predictions
-
-            # 使用最后的历史数据作为输入
-
-            # 打印数据历史长度和 datetime 索引范围
-
-            # 使用最后的历史数据作为输入
-
-        # 设置要预测的未来小时数
-        future_hours = 36  # 预测未来的小时数
-
-        # 使用最后的历史数据作为输入
-        last_data = [d['close'] for d in self.data_history]
-
-        # 使用新逻辑预测未来小时数的价格
-        future_predictions = predict_future(future_hours, last_data, self.modelnn, self.minmax, self.params.timestamp)
-        print(f"未来{future_hours}小时的预测价格: {future_predictions}")
-
-        # 获取最后一个有效的时间点
-        last_datetime = self.datas[0].datetime.datetime(-1)
-        print(f"最后一个时间点: {last_datetime}")
-
-        # 获取未来的时间轴（小时级别）
-        future_datetimes = pd.date_range(last_datetime + timedelta(hours=1), periods=future_hours, freq='H')
-        print(f"未来的时间范围: {future_datetimes}")
-
-        # 仅绘制预测的部分
-        plt.figure(figsize=(15, 7))
-
-        # 绘制未来预测价格
-        plt.plot(future_datetimes, future_predictions, label='Predicted Future Close Price', color='orange')
-
-        # 设置图表标题和标签
-        plt.title('Predicted Future Prices for Next 48 Hours')
-        plt.xlabel('Time')
-        plt.ylabel('Price')
-        # plt.legend()
         plt.show()
 
 # 加载数据并初始化策略
@@ -317,7 +289,6 @@ for filename in os.listdir(folder_path):
 df_resampled = pd.concat(df_list)
 
 # 归一化只对 close 进行
-# 使用 numpy 数组拟合 MinMaxScaler 而不是带有列名的 DataFrame
 minmax = MinMaxScaler().fit(df_resampled[['close']].to_numpy().astype('float32'))
 
 # 打印数据预览
