@@ -17,10 +17,29 @@ logging.basicConfig(level=logging.INFO,
                         logging.FileHandler('trading_log.log'),  # 写入文件
                         logging.StreamHandler()  # 输出到控制台
                     ])
+def log_order_details(order):
+    """将订单详细信息以可读的中文格式记录到日志"""
+    logging.info("订单详情 (order details):")
+    logging.info(f"交易对 (symbol): {order['symbol']}")
+    logging.info(f"订单ID (orderId): {order['orderId']}")
+    logging.info(f"客户订单ID (clientOrderId): {order['clientOrderId']}")
+    logging.info(f"交易时间 (transactTime): {order['transactTime']}")
+    logging.info(f"价格 (price): {order['price']}")
+    logging.info(f"原始数量 (origQty): {order['origQty']}")
+    logging.info(f"已执行数量 (executedQty): {order['executedQty']}")
+    logging.info(f"累计成交金额 (cummulativeQuoteQty): {order['cummulativeQuoteQty']}")
+    logging.info(f"订单状态 (status): {order['status']}")
+    logging.info(f"订单类型 (type): {order['type']}")
+    logging.info(f"订单方向 (side): {order['side']}")
+    logging.info("成交明细 (fills):")
+    for fill in order['fills']:
+        logging.info(f"    成交价格 (price): {fill['price']}, 成交数量 (qty): {fill['qty']}, 佣金 (commission): {fill['commission']}, 佣金资产 (commissionAsset): {fill['commissionAsset']}")
+    logging.info(f"自成交预防模式 (selfTradePreventionMode): {order.get('selfTradePreventionMode', '无')}")
+    logging.info("")
 
 # Binance API 配置
-api_key = "HdznWOVO7qLVgG3448j8s5ERAuH98a4GalNJEAMkmGfDrJgPkDKrWx39K7gCA1HU"
-api_secret = "RfOQ6kh0DrvniBNPjrEBwTn0F3PLwSuWQnRgKtGsESs5xnCVKAIUYxthUAUTd7z"
+api_key = "7XbBmjA1UxBzNBe0AriKyYlwt2HvOlNEzftJ9bN2g5kbUFACDKppATNlqGBtvlNE"
+api_secret = "2BLZojVtSzDfyVgE1TW6U6MCSxDoDh5pnNZnz0BohEOGc7duHsT7mob2jf42ksOA"
 client = Client(api_key, api_secret, testnet=True)
 
 # 加载模型
@@ -56,7 +75,23 @@ processed_trades = set()
 
 symbol = "BTCUSDT"  # 交易对
 
-
+force_trade = True  # 设置为True以强制触发交易，方便测试
+account_info = client.get_account()
+# 获取交易对的精度信息
+def get_symbol_info(client, symbol):
+    info = client.get_symbol_info(symbol)
+    print(info)
+    step_size = None
+    for f in info['filters']:
+        if f['filterType'] == 'LOT_SIZE':
+            step_size = float(f['stepSize'])
+            break
+    if step_size is None:
+        raise ValueError("No stepSize found for symbol.")
+    return step_size
+step_size = get_symbol_info(client, symbol)  # 获取交易对的精度限制
+logging.info("交易对精度信息：%s", step_size)
+print(f"账户信息：{account_info}")
 def get_realtime_data(client, symbol, interval='1h', lookback='48'):
     """从Binance获取实时数据"""
     klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
@@ -64,6 +99,8 @@ def get_realtime_data(client, symbol, interval='1h', lookback='48'):
                                        'close_time', 'quote_asset_volume', 'number_of_trades',
                                        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
     df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+    # 时区转换
+    df['open_time'] = df['open_time'].dt.tz_localize('UTC').dt.tz_convert('Asia/Shanghai')
     df.set_index('open_time', inplace=True)
     df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
     return df
@@ -112,18 +149,37 @@ def identify_trend(future_predictions):
 
     return trends, peaks, valleys
 
-
-def execute_trade(client, symbol, side, quantity):
+def round_step_size(quantity, step_size):
+    """将数量四舍五入到正确的精度"""
+    return round(quantity - (quantity % step_size), 8)
+def execute_trade(client, symbol, side, quantity, price=None, type='MARKET'):
     """执行交易"""
     try:
-        order = client.futures_create_order(
-            symbol=symbol,
-            side=side,
-            type="MARKET",
-            quantity=quantity,
-            positionSide="BOTH",
-        )
-        logging.info("%s order placed successfully: %s", side, order)
+        # 将数量四舍五入到正确的精度
+        quantity = round_step_size(quantity, step_size)
+        # 如果是市价单
+        if type == 'MARKET':
+            order = client.create_order(
+                symbol=symbol,
+                side=side,
+                type=type,
+                quantity=quantity
+            )
+        # 如果是限价单
+        elif type == 'LIMIT' and price:
+            order = client.create_order(
+                symbol=symbol,
+                side=side,
+                type=type,
+                timeInForce='GTC',
+                quantity=quantity,
+                price=str(price)
+            )
+        else:
+            raise ValueError("Invalid order type or missing price for LIMIT order.")
+
+            # 记录订单详细信息
+        log_order_details(order)
         return order
     except Exception as e:
         logging.error("Failed to place %s order: %s", side, str(e))
@@ -179,7 +235,41 @@ def run_strategy():
         future_datetimes = pd.date_range(data_history[-1]['open_time'] + timedelta(hours=1), periods=trend_window,
                                          freq='H')
         plot_predictions(future_datetimes, future_prices, peaks, valleys)
+        force_trade=True
+        # 测试交易触发条件
+        if force_trade:
+            print("Force trading for testing purposes...")
 
+            if current_inventory == 0 and cash >= buy_amount:
+                buy_price = data_history[-1]['close']
+                buy_units = buy_amount / buy_price
+                cash -= buy_amount
+                current_inventory += buy_units
+                states_buy.append(len(data_history) - 1)
+                trades.append({
+                    'datetime': data_history[-1]['open_time'],
+                    'price': buy_price,
+                    'size': buy_units,
+                    'action': 'buy'
+                })
+                execute_trade(client, symbol, "BUY", buy_units)
+
+            elif current_inventory > 0:
+                sell_price = data_history[-1]['close']
+                sell_units = min(current_inventory, max_sell)
+                cash += sell_units * sell_price
+                current_inventory -= sell_units
+                states_sell.append(len(data_history) - 1)
+                trades.append({
+                    'datetime': data_history[-1]['open_time'],
+                    'price': sell_price,
+                    'size': sell_units,
+                    'action': 'sell'
+                })
+                execute_trade(client, symbol, "SELL", sell_units)
+
+            # 只触发一次测试交易
+            force_trade = False
         # 处理买卖信号
         for i in range(min(len(valleys), len(peaks))):
             if peaks[i] > valleys[i]:  # 波峰必须在波谷之后
