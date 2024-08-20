@@ -428,24 +428,32 @@ def run_strategy():
             # 只触发一次测试交易
             force_trade = False
         # 处理买卖信号
+        # 遍历波谷和波峰，寻找交易机会
         for i in range(min(len(valleys), len(peaks))):
-            if peaks[i] > valleys[i]:  # 波峰必须在波谷之后
+            # 确保波峰在波谷之后
+            if peaks[i] > valleys[i]:
+                # 计算波谷和波峰的实际索引
                 actual_valley_index = len(data_history) - trend_window + valleys[i]
                 actual_peak_index = len(data_history) - trend_window + peaks[i]
 
+                # 跳过已经处理过的交易
                 if (actual_valley_index, actual_peak_index) in processed_trades:
                     continue
 
+                # 计算买卖价格
                 buy_price = data_history[-(trend_window - valleys[i])]['close']
                 sell_price = data_history[-(trend_window - peaks[i])]['close']
+                # 过滤掉价格差异过小的交易机会
                 if abs(sell_price - buy_price) < 800:
                     continue
 
+                # 记录波谷和波峰信息
                 logging.info("Detected valley at index %d, predicted buy price: %.2f, actual: %.2f",
                              actual_valley_index, future_prices[valleys[i]], buy_price)
                 logging.info("Detected peak at index %d, predicted sell price: %.2f, actual: %.2f", actual_peak_index,
                              future_prices[peaks[i]], sell_price)
 
+                # 当前库存为0且现金足够时，执行买入操作
                 if current_inventory == 0 and cash >= buy_amount:
                     buy_units = buy_amount / buy_price
                     cash -= buy_amount
@@ -459,6 +467,7 @@ def run_strategy():
                     })
                     execute_trade(client, symbol, "BUY", buy_units)
 
+                # 当前持有库存且波峰索引大于波谷索引时，执行卖出操作
                 if current_inventory > 0 and actual_peak_index > actual_valley_index:
                     sell_units = min(current_inventory, max_sell)
                     cash += sell_units * sell_price
@@ -472,9 +481,11 @@ def run_strategy():
                     })
                     execute_trade(client, symbol, "SELL", sell_units)
 
+                    # 记录交易利润
                     trade_profit = (sell_price - buy_price) * sell_units
                     logging.info("Trade profit: %.2f", trade_profit)
 
+                # 标记已经处理过的交易
                 processed_trades.add((actual_valley_index, actual_peak_index))
                 break
 
