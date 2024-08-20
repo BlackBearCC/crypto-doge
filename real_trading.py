@@ -70,6 +70,39 @@ def log_order_details(order):
     logging.info(f"自成交预防模式 (selfTradePreventionMode): {order.get('selfTradePreventionMode', '无')}")
     logging.info("")
 
+
+def view_open_orders(client, symbol=None):
+    """查看未完成的订单"""
+    try:
+        # 获取当前未完成的订单
+        open_orders = client.get_open_orders(symbol=symbol)
+
+        if open_orders:
+            logging.info(f"当前未完成订单 (Open Orders) ({len(open_orders)}):")
+            for order in open_orders:
+                logging.info(
+                    f"订单ID: {order['orderId']}, 交易对: {order['symbol']}, 数量: {order['origQty']}, 价格: {order['price']}, 状态: {order['status']}")
+            return open_orders
+        else:
+            logging.info("没有未完成的订单。")
+            return []
+
+    except Exception as e:
+        logging.error(f"获取订单失败: {str(e)}")
+        return []
+
+
+
+def cancel_order(client, symbol, order_id):
+    """取消指定订单"""
+    try:
+        cancel_response = client.cancel_order(symbol=symbol, orderId=order_id)
+        logging.info(f"已取消订单: {cancel_response}")
+        return cancel_response
+    except Exception as e:
+        logging.error(f"取消订单失败: {str(e)}")
+        return None
+
 # Binance API 配置
 api_key = "7XbBmjA1UxBzNBe0AriKyYlwt2HvOlNEzftJ9bN2g5kbUFACDKppATNlqGBtvlNE"
 api_secret = "2BLZojVtSzDfyVgE1TW6U6MCSxDoDh5pnNZnz0BohEOGc7duHsT7mob2jf42ksOA"
@@ -110,6 +143,63 @@ symbol = "BTCUSDT"  # 交易对
 
 force_trade = True  # 设置为True以强制触发交易，方便测试
 account_info = client.get_account()
+
+open_orders = view_open_orders(client)
+
+
+def view_order_history(client, symbol, limit=100):
+    """查看订单历史记录"""
+    try:
+        # 获取订单历史记录
+        orders = client.get_all_orders(symbol=symbol, limit=limit)
+
+        if orders:
+            logging.info(f"订单历史记录 (Order History) for {symbol}:")
+            for order in orders:
+                logging.info(
+                    f"订单ID: {order['orderId']}, 交易对: {order['symbol']}, 价格: {order['price']}, 数量: {order['origQty']}, 状态: {order['status']}, 类型: {order['type']}, 时间: {order['time']}")
+            return orders
+        else:
+            logging.info(f"{symbol} 没有订单历史记录。")
+            return []
+
+    except Exception as e:
+        logging.error(f"获取订单历史记录失败: {str(e)}")
+        return []
+
+
+# 示例用法，查看BTCUSDT交易对的订单记录
+order_history = view_order_history(client, symbol="BTCUSDT", limit=50)
+
+def sell_btc():
+    """卖出BTC"""
+    try:
+        # 获取账户信息，查找BTC余额
+        account_info = client.get_account()
+        btc_balance = None
+
+        for balance in account_info['balances']:
+            if balance['asset'] == 'BTC':
+                btc_balance = float(balance['free'])  # 获取可用余额
+                break
+
+        if btc_balance and btc_balance > 0:
+            # 创建市价卖单，将所有BTC卖出换成USDT
+            order = client.create_order(
+                symbol='BTCUSDT',
+                side='SELL',
+                type='MARKET',
+                quantity=btc_balance
+            )
+            logging.info(f"已创建市价卖单: {order}")
+        else:
+            logging.info("没有可用的BTC余额。")
+
+    except Exception as e:
+        logging.error(f"卖出BTC失败: {str(e)}")
+
+
+
 # 获取交易对的精度信息
 def get_symbol_info(client, symbol):
     info = client.get_symbol_info(symbol)
@@ -125,6 +215,31 @@ def get_symbol_info(client, symbol):
 step_size = get_symbol_info(client, symbol)  # 获取交易对的精度限制
 logging.info("交易对精度信息：%s", step_size)
 print(f"账户信息：{account_info}")
+
+
+def view_trade_history(client, symbol, limit=100):
+    """查看交易历史记录"""
+    try:
+        # 获取交易历史记录
+        trades = client.get_my_trades(symbol=symbol, limit=limit)
+
+        if trades:
+            logging.info(f"交易历史记录 (Trade History) for {symbol}:")
+            for trade in trades:
+                logging.info(
+                    f"交易ID: {trade['id']}, 订单ID: {trade['orderId']}, 价格: {trade['price']}, 数量: {trade['qty']}, 佣金: {trade['commission']}, 佣金资产: {trade['commissionAsset']}, 时间: {trade['time']}")
+            return trades
+        else:
+            logging.info(f"{symbol} 没有历史交易记录。")
+            return []
+
+    except Exception as e:
+        logging.error(f"获取交易历史记录失败: {str(e)}")
+        return []
+
+
+# 示例用法，查看BTCUSDT交易对的历史记录
+trade_history = view_trade_history(client, symbol="BTCUSDT", limit=50)
 def get_realtime_data(client, symbol, interval='1h', lookback='48'):
     """从Binance获取实时数据"""
     klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
