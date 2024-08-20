@@ -334,16 +334,24 @@ def execute_trade(client, symbol, side, quantity, price=None, type='MARKET'):
         return None
 
 
-def plot_predictions(future_datetimes, future_prices, peaks, valleys):
-    """绘制预测的价格和波峰波谷"""
+def plot_predictions(historical_datetimes, historical_prices, future_datetimes, future_prices, peaks, valleys):
+    """绘制历史数据（蓝色）和预测数据（黄色）以及波峰波谷"""
     plt.figure(figsize=(15, 5))
+
+    # 绘制实际的历史数据
+    plt.plot(historical_datetimes, historical_prices, color='blue', lw=2, label='Historical Prices')
+
+    # 绘制预测的未来数据
     plt.plot(future_datetimes, future_prices, color='orange', lw=2, label='Predicted Prices')
 
-    plt.plot([future_datetimes[i] for i in peaks], [future_prices[i] for i in peaks], "x", color='green', label='Peaks')
-    plt.plot([future_datetimes[i] for i in valleys], [future_prices[i] for i in valleys], "o", color='red',
-             label='Valleys')
+    # 合并历史和预测数据以标记波峰和波谷
+    combined_datetimes = np.concatenate((historical_datetimes, future_datetimes))
+    combined_prices = np.concatenate((historical_prices, future_prices))
 
-    plt.title('Predicted Future Prices with Peaks and Valleys')
+    plt.plot([combined_datetimes[i] for i in peaks], [combined_prices[i] for i in peaks], "x", color='green', label='Peaks')
+    plt.plot([combined_datetimes[i] for i in valleys], [combined_prices[i] for i in valleys], "o", color='red', label='Valleys')
+
+    plt.title('Historical and Predicted Prices with Peaks and Valleys')
     plt.xlabel('Time')
     plt.ylabel('Price')
     plt.legend()
@@ -372,17 +380,18 @@ def run_strategy():
         future_datetimes = pd.date_range(data_history[-1]['open_time'] + timedelta(hours=1), periods=trend_window,
                                          freq='H')
 
-        # 记录预测的价格和对应的未来时间到日志
-        future_prices_with_time = list(zip(future_datetimes, future_prices))
-        logging.info("Predicted future prices with time: %s", future_prices_with_time)
+        # 提取历史数据
+        historical_prices = [d['close'] for d in data_history[-trend_window:]]
+        historical_datetimes = pd.date_range(data_history[-trend_window]['open_time'], periods=trend_window, freq='H')
 
-        # 识别趋势和波峰波谷
-        trends, peaks, valleys = identify_trend(future_prices)
+        # 合并历史数据和预测数据进行波峰波谷识别
+        combined_prices = np.concatenate((historical_prices, future_prices))
+        peaks, valleys = find_peaks(combined_prices)[0], find_peaks(-combined_prices)[0]
 
-        # 绘制预测结果和波峰波谷
-        future_datetimes = pd.date_range(data_history[-1]['open_time'] + timedelta(hours=1), periods=trend_window,
-                                         freq='H')
-        plot_predictions(future_datetimes, future_prices, peaks, valleys)
+        # 绘制历史和预测的价格以及波峰波谷
+        plot_predictions(historical_datetimes, historical_prices, future_datetimes, future_prices, peaks, valleys)
+
+
         force_trade=True
         # 测试交易触发条件
         if force_trade:
