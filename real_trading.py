@@ -3,6 +3,11 @@ import time
 import numpy as np
 import pandas as pd
 from binance.client import Client
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus.para import Paragraph
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from datetime import datetime, timedelta
@@ -17,6 +22,34 @@ logging.basicConfig(level=logging.INFO,
                         logging.FileHandler('trading_log.log'),  # 写入文件
                         logging.StreamHandler()  # 输出到控制台
                     ])
+def log_account_info(client):
+    """记录账户信息"""
+    try:
+        account_info = client.get_account()
+        logging.info("账户信息 (Account Info):")
+        logging.info(f"手续费 (makerCommission): {account_info['makerCommission']}")
+        logging.info(f"手续费 (takerCommission): {account_info['takerCommission']}")
+        logging.info(f"买方手续费 (buyerCommission): {account_info['buyerCommission']}")
+        logging.info(f"卖方手续费 (sellerCommission): {account_info['sellerCommission']}")
+        logging.info(f"可交易 (canTrade): {account_info['canTrade']}")
+        logging.info(f"可提取 (canWithdraw): {account_info['canWithdraw']}")
+        logging.info(f"可存入 (canDeposit): {account_info['canDeposit']}")
+
+        logging.info(f"余额 (Balances):")
+        for balance in account_info['balances']:
+            logging.info(f"    资产 (asset): {balance['asset']}, 可用余额 (free): {balance['free']}, 冻结余额 (locked): {balance['locked']}")
+        logging.info("")
+
+        # 打印账户的订单信息
+        open_orders = client.get_open_orders()
+        logging.info("当前未完成订单 (Open Orders):")
+        for order in open_orders:
+            log_order_details(order)
+
+    except Exception as e:
+        logging.error("获取账户信息失败: %s", str(e))
+
+
 def log_order_details(order):
     """将订单详细信息以可读的中文格式记录到日志"""
     logging.info("订单详情 (order details):")
@@ -325,6 +358,8 @@ def run_strategy():
         portfolio_value.append(current_portfolio_value)
         logging.info("Current Portfolio Value: %.2f", current_portfolio_value)
 
+        # 记录账户信息
+        log_account_info(client)
         time.sleep(3600)  # 等待1小时再获取新数据
 
 
