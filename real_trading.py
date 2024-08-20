@@ -35,9 +35,9 @@ def log_account_info(client):
         logging.info(f"可提取 (canWithdraw): {account_info['canWithdraw']}")
         logging.info(f"可存入 (canDeposit): {account_info['canDeposit']}")
 
-        logging.info(f"余额 (Balances):")
-        for balance in account_info['balances']:
-            logging.info(f"    资产 (asset): {balance['asset']}, 可用余额 (free): {balance['free']}, 冻结余额 (locked): {balance['locked']}")
+        # logging.info(f"余额 (Balances):")
+        # for balance in account_info['balances']:
+        #     logging.info(f"    资产 (asset): {balance['asset']}, 可用余额 (free): {balance['free']}, 冻结余额 (locked): {balance['locked']}")
         logging.info("")
 
         # 打印账户的订单信息
@@ -169,7 +169,7 @@ def view_order_history(client, symbol, limit=100):
 
 
 # 示例用法，查看BTCUSDT交易对的订单记录
-order_history = view_order_history(client, symbol="BTCUSDT", limit=50)
+# order_history = view_order_history(client, symbol="BTCUSDT", limit=50)
 
 def sell_btc():
     """卖出BTC"""
@@ -214,7 +214,7 @@ def get_symbol_info(client, symbol):
     return step_size
 step_size = get_symbol_info(client, symbol)  # 获取交易对的精度限制
 logging.info("交易对精度信息：%s", step_size)
-print(f"账户信息：{account_info}")
+# print(f"账户信息：{account_info}")
 
 
 def view_trade_history(client, symbol, limit=100):
@@ -239,7 +239,7 @@ def view_trade_history(client, symbol, limit=100):
 
 
 # 示例用法，查看BTCUSDT交易对的历史记录
-trade_history = view_trade_history(client, symbol="BTCUSDT", limit=50)
+# trade_history = view_trade_history(client, symbol="BTCUSDT", limit=50)
 def get_realtime_data(client, symbol, interval='1h', lookback='48'):
     """从Binance获取实时数据"""
     klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
@@ -278,24 +278,6 @@ def predict_future(last_data, modelnn, minmax, timestamp, future_hours=14):
 
     return future_predictions
 
-
-def identify_trend(future_predictions):
-    """识别价格趋势"""
-    peaks, _ = find_peaks(future_predictions)
-    valleys, _ = find_peaks(-np.array(future_predictions))
-
-    trends = ['sideways'] * len(future_predictions)
-    trend_points = sorted(peaks.tolist() + valleys.tolist())
-
-    for i in range(1, len(trend_points)):
-        start = trend_points[i - 1]
-        end = trend_points[i]
-        if future_predictions[end] > future_predictions[start]:
-            trends[start:end + 1] = ['uptrend'] * (end - start + 1)
-        else:
-            trends[start:end + 1] = ['downtrend'] * (end - start + 1)
-
-    return trends, peaks, valleys
 
 def round_step_size(quantity, step_size):
     """将数量四舍五入到正确的精度"""
@@ -357,7 +339,13 @@ def plot_predictions(historical_datetimes, historical_prices, future_datetimes, 
     plt.legend()
     plt.show()
 
-
+def wait_until_next_hour():
+    """等待直到下一个整点,该函数计算当前时间与下一个整点的时间差，并休眠这段时间，确保代码在整点运行。"""
+    now = datetime.now()
+    next_hour = (now + timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    sleep_time = (next_hour - now).total_seconds()
+    logging.info(f"等待 {sleep_time} 秒，直到下一个整点 {next_hour.strftime('%Y-%m-%d %H:%M:%S')}")
+    time.sleep(sleep_time)
 def run_strategy():
     global cash, current_inventory, states_buy, states_sell, portfolio_value, data_history, trades
 
@@ -386,108 +374,46 @@ def run_strategy():
 
         # 合并历史数据和预测数据进行波峰波谷识别
         combined_prices = np.concatenate((historical_prices, future_prices))
+        combined_datetimes = np.concatenate((historical_datetimes, future_datetimes))
         peaks, valleys = find_peaks(combined_prices)[0], find_peaks(-combined_prices)[0]
 
         # 绘制历史和预测的价格以及波峰波谷
         plot_predictions(historical_datetimes, historical_prices, future_datetimes, future_prices, peaks, valleys)
 
+        # 获取最近的收盘价
+        current_price = data_history[-1]['close']
+        current_time = data_history[-1]['open_time']
 
-        force_trade=True
-        # 测试交易触发条件
-        if force_trade:
-            print("Force trading for testing purposes...")
+        # 查找最近的波谷和波峰
+        recent_valley_index = valleys[-1] if len(valleys) > 0 else None
+        recent_peak_index = peaks[-1] if len(peaks) > 0 else None
 
-            if current_inventory == 0 and cash >= buy_amount:
-                buy_price = data_history[-1]['close']
-                buy_units = buy_amount / buy_price
-                cash -= buy_amount
-                current_inventory += buy_units
-                states_buy.append(len(data_history) - 1)
-                trades.append({
-                    'datetime': data_history[-1]['open_time'],
-                    'price': buy_price,
-                    'size': buy_units,
-                    'action': 'buy'
-                })
-                execute_trade(client, symbol, "BUY", buy_units)
+        if recent_valley_index is not None:
+            recent_valley_price = combined_prices[recent_valley_index]
+            recent_valley_time = combined_datetimes[recent_valley_index]
 
-            elif current_inventory > 0:
-                sell_price = data_history[-1]['close']
-                sell_units = min(current_inventory, max_sell)
-                cash += sell_units * sell_price
-                current_inventory -= sell_units
-                states_sell.append(len(data_history) - 1)
-                trades.append({
-                    'datetime': data_history[-1]['open_time'],
-                    'price': sell_price,
-                    'size': sell_units,
-                    'action': 'sell'
-                })
-                execute_trade(client, symbol, "SELL", sell_units)
-
-            # 只触发一次测试交易
-            force_trade = False
-        # 处理买卖信号
-        # 遍历波谷和波峰，寻找交易机会
-        for i in range(min(len(valleys), len(peaks))):
-            # 确保波峰在波谷之后
-            if peaks[i] > valleys[i]:
-                # 计算波谷和波峰的实际索引
-                actual_valley_index = len(data_history) - trend_window + valleys[i]
-                actual_peak_index = len(data_history) - trend_window + peaks[i]
-
-                # 跳过已经处理过的交易
-                if (actual_valley_index, actual_peak_index) in processed_trades:
-                    continue
-
-                # 计算买卖价格
-                buy_price = data_history[-(trend_window - valleys[i])]['close']
-                sell_price = data_history[-(trend_window - peaks[i])]['close']
-                # 过滤掉价格差异过小的交易机会
-                if abs(sell_price - buy_price) < 800:
-                    continue
-
-                # 记录波谷和波峰信息
-                logging.info("Detected valley at index %d, predicted buy price: %.2f, actual: %.2f",
-                             actual_valley_index, future_prices[valleys[i]], buy_price)
-                logging.info("Detected peak at index %d, predicted sell price: %.2f, actual: %.2f", actual_peak_index,
-                             future_prices[peaks[i]], sell_price)
-
-                # 当前库存为0且现金足够时，执行买入操作
+        if recent_peak_index is not None:
+            recent_peak_price = combined_prices[recent_peak_index]
+            recent_peak_time = combined_datetimes[recent_peak_index]
+            # 判断当前价格是否处于最近的波谷时间区间内
+            if recent_valley_index is not None and recent_valley_time <= current_time <= (
+                    recent_valley_time + timedelta(hours=1)):
                 if current_inventory == 0 and cash >= buy_amount:
+                    logging.info(f"当前价格 {current_price} 处于波谷区间，执行买入操作。")
+                    buy_price = current_price
                     buy_units = buy_amount / buy_price
                     cash -= buy_amount
                     current_inventory += buy_units
-                    states_buy.append(actual_valley_index)
+                    states_buy.append(len(data_history) - 1)
                     trades.append({
-                        'datetime': data_history[-1]['open_time'],
+                        'datetime': current_time,
                         'price': buy_price,
                         'size': buy_units,
                         'action': 'buy'
                     })
                     execute_trade(client, symbol, "BUY", buy_units)
-
-                # 当前持有库存且波峰索引大于波谷索引时，执行卖出操作
-                if current_inventory > 0 and actual_peak_index > actual_valley_index:
-                    sell_units = min(current_inventory, max_sell)
-                    cash += sell_units * sell_price
-                    current_inventory -= sell_units
-                    states_sell.append(actual_peak_index)
-                    trades.append({
-                        'datetime': data_history[-1]['open_time'],
-                        'price': sell_price,
-                        'size': sell_units,
-                        'action': 'sell'
-                    })
-                    execute_trade(client, symbol, "SELL", sell_units)
-
-                    # 记录交易利润
-                    trade_profit = (sell_price - buy_price) * sell_units
-                    logging.info("Trade profit: %.2f", trade_profit)
-
-                # 标记已经处理过的交易
-                processed_trades.add((actual_valley_index, actual_peak_index))
-                break
+            else:
+                logging.info("当前价格不在波谷区间，未执行交易。")
 
         current_portfolio_value = cash + current_inventory * data_history[-1]['close']
         portfolio_value.append(current_portfolio_value)
@@ -495,7 +421,9 @@ def run_strategy():
 
         # 记录账户信息
         log_account_info(client)
-        time.sleep(3600)  # 等待1小时再获取新数据
+
+        # 等待直到下一个整点
+        wait_until_next_hour()
 
 
 run_strategy()
