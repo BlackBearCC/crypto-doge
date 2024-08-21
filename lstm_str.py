@@ -13,7 +13,6 @@ class MyLSTMStrategy(bt.Strategy):
         ('model_path', 'quant_model.h5'),
         ('initial_money', 10000),
         ('buy_amount', 1000),
-        ('max_sell', 10),
         ('stop_loss', 0.03),
         ('take_profit', 0.07),
     )
@@ -24,12 +23,12 @@ class MyLSTMStrategy(bt.Strategy):
 
         self.minmax = MinMaxScaler()
         self.cash = self.params.initial_money
-        self.current_inventory = 0
-        self.states_buy = []
-        self.states_sell = []
+        self.orders = []  # 存储每笔买入订单 (price, size, datetime)
         self.portfolio_value = [self.cash]
         self.data_history = []
         self.trades = []  # 存储每笔交易的详情
+        self.states_buy = []  # 记录买入点
+        self.states_sell = []  # 记录卖出点
 
         self.order = None
 
@@ -39,7 +38,8 @@ class MyLSTMStrategy(bt.Strategy):
             'close': self.data.close[0],
             'high': self.data.high[0],
             'low': self.data.low[0],
-            'volume': self.data.volume[0]
+            'volume': self.data.volume[0],
+            'datetime': self.data.datetime.datetime(0)  # 记录当前时间
         })
         if self.order:
             return
@@ -48,18 +48,18 @@ class MyLSTMStrategy(bt.Strategy):
             return
 
         # 预测未来1小时的收盘价
-        future_price = self.predict_future_price()
+        future_price, prediction_time = self.predict_future_price()
 
         # 根据预测的价格决定买卖
         if future_price > self.data.close[0]:
             print(f"预测价格上涨，执行买入操作: 预测价格 {future_price:.2f}, 当前价格 {self.data.close[0]:.2f}")
-            self.handle_buy_signal(future_price)
+            self.handle_buy_signal(future_price, prediction_time)
         elif future_price < self.data.close[0]:
             print(f"预测价格下跌，执行卖出操作: 预测价格 {future_price:.2f}, 当前价格 {self.data.close[0]:.2f}")
-            self.handle_sell_signal(future_price)
+            self.handle_sell_signal(future_price, prediction_time)
 
         # 更新投资组合的总价值
-        portfolio_value = self.cash + self.current_inventory * self.data.close[0]
+        portfolio_value = self.cash + sum(order[1] * self.data.close[0] for order in self.orders)
         self.portfolio_value.append(portfolio_value)
 
     def predict_future_price(self):
@@ -73,41 +73,43 @@ class MyLSTMStrategy(bt.Strategy):
         prediction = self.modelnn.predict(input_data[np.newaxis, :, :])
         predicted_close_price_scaled = prediction[0, -1]
         predicted_close_price = self.minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
-        print(f"预测未来1小时的价格为: {predicted_close_price:.2f}")
-        return predicted_close_price
+        prediction_time = self.data.datetime.datetime(0) + timedelta(hours=1)  # 预测时间为当前时间+1小时
+        print(f"预测未来1小时的价格为: {predicted_close_price:.2f}, 预测时间: {prediction_time}")
+        return predicted_close_price, prediction_time
 
-    def handle_buy_signal(self, predicted_price):
-        # if self.current_inventory > 0:
-        #     return  # 已经持仓，不重复买入
-
+    def handle_buy_signal(self, predicted_price, prediction_time):
         buy_units = self.params.buy_amount / self.data.close[0]  # 计算买入单位
         self.cash -= self.params.buy_amount
-        self.current_inventory += buy_units
-        self.states_buy.append(len(self.data_history))
-        print(f"买入操作: {buy_units:.6f} 单位，买入价格 {self.data.close[0]:.2f}, 持仓 {self.current_inventory:.6f}")
+        self.orders.append((self.data.close[0], buy_units, prediction_time))  # 记录每笔订单
+        self.states_buy.append(len(self.data_history))  # 记录买入点
+        print(f"买入操作: {buy_units:.6f} 单位，买入价格 {self.data.close[0]:.2f}, 持仓增加")
 
         # 记录买入交易
         self.trades.append({
-            'datetime': self.data.datetime.datetime(-1),
+            'datetime': prediction_time,
             'price': self.data.close[0],
             'size': buy_units,
             'action': 'buy'
         })
 
-    def handle_sell_signal(self, predicted_price):
-        if self.current_inventory <= 0:
+    def handle_sell_signal(self, predicted_price, prediction_time):
+        if not self.orders:
             return  # 没有持仓，不进行卖出
 
-        sell_units = self.current_inventory  # 卖出全部持仓
-        self.cash += sell_units * self.data.close[0]
-        self.current_inventory -= sell_units
-        self.states_sell.append(len(self.data_history))
-        print(f"卖出操作: {sell_units:.6f} 单位，卖出价格 {self.data.close[0]:.2f}, 持仓 {self.current_inventory:.6f}")
+        # 按买入价格排序，优先卖出最低价的持仓
+        self.orders.sort(key=lambda x: x[0])
+
+        sell_order = self.orders.pop(0)  # 卖出价格最低的一笔订单
+        sell_units = sell_order[1]
+        sell_price = self.data.close[0]
+        self.cash += sell_units * sell_price
+        self.states_sell.append(len(self.data_history))  # 记录卖出点
+        print(f"卖出操作: {sell_units:.6f} 单位，卖出价格 {sell_price:.2f}, 持仓减少")
 
         # 记录卖出交易
         self.trades.append({
-            'datetime': self.data.datetime.datetime(-1),
-            'price': self.data.close[0],
+            'datetime': prediction_time,
+            'price': sell_price,
             'size': sell_units,
             'action': 'sell'
         })
@@ -174,8 +176,9 @@ class MyLSTMStrategy(bt.Strategy):
 
         # 打印最终资金和持仓
         print(f"最终资金: {self.cash:.2f}")
-        if self.current_inventory > 0:
-            print(f"最终持仓: {self.current_inventory:.6f} 单位，当前价格: {self.data.close[0]:.2f}")
+        if self.orders:
+            for order in self.orders:
+                print(f"未平仓单: 买入价格 {order[0]:.2f}，数量 {order[1]:.6f}，买入时间 {order[2]}")
 
         # 计算交易结果
         total_profit = 0
@@ -185,7 +188,8 @@ class MyLSTMStrategy(bt.Strategy):
             if buy_trade['action'] == 'buy' and sell_trade['action'] == 'sell':
                 profit = (sell_trade['price'] - buy_trade['price']) * buy_trade['size']
                 total_profit += profit
-                print(f"交易 {i // 2 + 1}: 买入价格 {buy_trade['price']:.2f}，卖出价格 {sell_trade['price']:.2f}，利润 {profit:.2f}")
+                print(f"交易 {i // 2 + 1}: 买入价格 {buy_trade['price']:.2f}，卖出价格 {sell_trade['price']:.2f}，"
+                      f"利润 {profit:.2f}, 买入日期 {buy_trade['datetime']}, 卖出日期 {sell_trade['datetime']}")
 
         print(f"总利润: {total_profit:.2f}")
 
