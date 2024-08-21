@@ -240,7 +240,7 @@ def view_trade_history(client, symbol, limit=100):
 
 # 示例用法，查看BTCUSDT交易对的历史记录
 # trade_history = view_trade_history(client, symbol="BTCUSDT", limit=50)
-def get_realtime_data(client, symbol, interval='1h', lookback='48'):
+def get_realtime_data(client, symbol, interval='1h', lookback='3000'):
     """从Binance获取实时数据"""
     klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
     df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume',
@@ -347,7 +347,7 @@ def wait_until_next_hour():
     logging.info(f"等待 {sleep_time} 秒，直到下一个整点 {next_hour.strftime('%Y-%m-%d %H:%M:%S')}")
     time.sleep(sleep_time)
 def run_strategy():
-    global cash, current_inventory, states_buy, states_sell, portfolio_value, data_history, trades
+    global cash, current_inventory, states_buy, states_sell, portfolio_value, data_history, trades,short_inventory
 
     logging.info("开始运行策略...")
     # 获取实时数据
@@ -395,25 +395,89 @@ def run_strategy():
         if recent_peak_index is not None:
             recent_peak_price = combined_prices[recent_peak_index]
             recent_peak_time = combined_datetimes[recent_peak_index]
-            # 判断当前价格是否处于最近的波谷时间区间内
-            if recent_valley_index is not None and recent_valley_time <= current_time <= (
-                    recent_valley_time + timedelta(hours=1)):
-                if current_inventory == 0 and cash >= buy_amount:
-                    logging.info(f"当前价格 {current_price} 处于波谷区间，执行买入操作。")
-                    buy_price = current_price
-                    buy_units = buy_amount / buy_price
-                    cash -= buy_amount
-                    current_inventory += buy_units
-                    states_buy.append(len(data_history) - 1)
-                    trades.append({
-                        'datetime': current_time,
-                        'price': buy_price,
-                        'size': buy_units,
-                        'action': 'buy'
-                    })
-                    execute_trade(client, symbol, "BUY", buy_units)
-            else:
-                logging.info("当前价格不在波谷区间，未执行交易。")
+
+        # 判断波峰和波谷的价差是否大于800点
+        if recent_valley_index is not None and recent_peak_index is not None:
+            price_difference = abs(recent_peak_price - recent_valley_price)
+            logging.info(f"波峰和波谷之间的价差为: {price_difference}")
+
+            if price_difference < 800:
+                logging.info("波峰和波谷之间的价差小于800点，未执行交易。")
+                wait_until_next_hour()
+                continue
+
+        # 买入（多头）逻辑：当前时间处于波谷区间内，且价差大于800点
+        if recent_valley_index is not None and recent_valley_time <= current_time <= (recent_valley_time + timedelta(hours=1)):
+            if current_inventory == 0 and cash >= buy_amount:
+                logging.info(f"当前价格 {current_price} 处于波谷区间，执行买入操作。")
+                buy_price = current_price
+                buy_units = buy_amount / buy_price
+                cash -= buy_amount
+                current_inventory += buy_units
+                order_id = execute_trade(client, symbol, "BUY", buy_units)
+                states_buy.append({
+                    'datetime': current_time,
+                    'price': buy_price,
+                    'size': buy_units,
+                    'order_id': order_id,
+                    'action': 'buy'
+                })
+                trades.append(states_buy[-1])
+
+        # 卖出（平仓）逻辑：当前时间处于波峰区间内，且价差大于800点
+        elif recent_peak_index is not None and recent_peak_time <= current_time <= (recent_peak_time + timedelta(hours=1)):
+            if current_inventory > 0:
+                logging.info(f"当前价格 {current_price} 处于波峰区间，执行卖出操作。")
+                sell_price = current_price
+                sell_units = min(current_inventory, max_sell)
+                cash += sell_units * sell_price
+                current_inventory -= sell_units
+                order_id = execute_trade(client, symbol, "SELL", sell_units)
+                states_sell.append({
+                    'datetime': current_time,
+                    'price': sell_price,
+                    'size': sell_units,
+                    'order_id': order_id,
+                    'action': 'sell'
+                })
+                trades.append(states_sell[-1])
+
+        # 做空逻辑：在波峰处开空单
+        if recent_peak_index is not None and recent_peak_time <= current_time <= (recent_peak_time + timedelta(hours=1)):
+            if current_inventory == 0 and short_inventory == 0 and cash >= buy_amount:
+                logging.info(f"当前价格 {current_price} 处于波峰区间，执行做空操作。")
+                short_price = current_price
+                short_units = buy_amount / short_price
+                cash += buy_amount
+                short_inventory += short_units
+                order_id = execute_trade(client, symbol, "SELL", short_units)
+                states_sell.append({
+                    'datetime': current_time,
+                    'price': short_price,
+                    'size': short_units,
+                    'order_id': order_id,
+                    'action': 'short'
+                })
+                trades.append(states_sell[-1])
+
+        # 平空逻辑：在波谷处平仓（买入）
+        elif recent_valley_index is not None and recent_valley_time <= current_time <= (recent_valley_time + timedelta(hours=1)):
+            if short_inventory > 0:
+                logging.info(f"当前价格 {current_price} 处于波谷区间，执行平空操作。")
+                cover_price = current_price
+                cover_units = short_inventory
+                cash -= cover_units * cover_price
+                short_inventory -= cover_units
+                order_id = execute_trade(client, symbol, "BUY", cover_units)
+                states_buy.append({
+                    'datetime': current_time,
+                    'price': cover_price,
+                    'size': cover_units,
+                    'order_id': order_id,
+                    'action': 'cover'
+                })
+                trades.append(states_buy[-1])
+
 
         current_portfolio_value = cash + current_inventory * data_history[-1]['close']
         portfolio_value.append(current_portfolio_value)
