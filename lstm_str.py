@@ -6,15 +6,17 @@ import tensorflow as tf
 from sklearn.preprocessing import MinMaxScaler
 import backtrader as bt
 import matplotlib.pyplot as plt
+import backtrader.indicators as btind
 
 class MyLSTMStrategy(bt.Strategy):
     params = (
         ('timestamp', 5),
         ('model_path', 'quant_model.h5'),
         ('initial_money', 10000),
-        ('buy_amount', 1000),
-        ('stop_loss', 0.03),
-        ('take_profit', 0.07),
+        ('trade_amount', 200),  # 每次交易的固定金额
+        ('atr_period', 14),  # ATR计算周期
+        ('atr_threshold', 500),  # ATR阈值
+        ('max_trade_size', 0.5),
     )
 
     def __init__(self):
@@ -22,15 +24,9 @@ class MyLSTMStrategy(bt.Strategy):
         print("模型已加载:", self.params.model_path)
 
         self.minmax = MinMaxScaler()
-        self.cash = self.params.initial_money
-        self.orders = []  # 存储每笔买入订单 (price, size, datetime)
-        self.portfolio_value = [self.cash]
         self.data_history = []
-        self.trades = []  # 存储每笔交易的详情
-        self.states_buy = []  # 记录买入点
-        self.states_sell = []  # 记录卖出点
-
-        self.order = None
+        self.atr = btind.AverageTrueRange(self.data, period=self.params.atr_period)
+        self.order = None  # 用于跟踪挂单
 
     def next(self):
         # 收集当前的数据点
@@ -41,29 +37,42 @@ class MyLSTMStrategy(bt.Strategy):
             'volume': self.data.volume[0],
             'datetime': self.data.datetime.datetime(0)  # 记录当前时间
         })
-        if self.order:
+
+        if len(self.data_history) < self.params.timestamp + self.params.atr_period:
             return
 
-        if len(self.data_history) < self.params.timestamp + 14:
+        # ATR过滤：仅在波动率高于阈值时执行交易
+        if self.atr[0] < self.params.atr_threshold:
+            print(f"波动率过低（ATR: {self.atr[0]:.6f}），跳过交易。")
             return
 
-        # 预测未来1小时的收盘价
-        future_price, prediction_time = self.predict_future_price()
+        # 预测未来1小时的方向（上涨或下跌）
+        direction, prediction_time = self.predict_direction()
 
-        # 根据预测的价格决定买卖
-        if future_price > self.data.close[0]:
-            print(f"预测价格上涨，执行买入操作: 预测价格 {future_price:.2f}, 当前价格 {self.data.close[0]:.2f}")
-            self.handle_buy_signal(future_price, prediction_time)
-        elif future_price < self.data.close[0]:
-            print(f"预测价格下跌，执行卖出操作: 预测价格 {future_price:.2f}, 当前价格 {self.data.close[0]:.2f}")
-            self.handle_sell_signal(future_price, prediction_time)
+        # 获取账户当前资金
+        current_cash = self.broker.get_cash()
 
-        # 更新投资组合的总价值
-        portfolio_value = self.cash + sum(order[1] * self.data.close[0] for order in self.orders)
-        self.portfolio_value.append(portfolio_value)
+        # 限制交易规模
+        trade_amount = min(self.params.trade_amount, current_cash * self.params.max_trade_size)
 
-    def predict_future_price(self):
-        # 使用模型预测未来1小时的价格
+        # 平仓操作并开新仓
+        if direction > 0:  # 预测价格上涨
+            if self.position.size < 0:  # 如果持有空头仓位，先平仓
+                print(f"当前持有空头仓位，执行回补操作: 当前价格 {self.data.close[0]:.2f}")
+                self.close()  # 平空头仓位
+            if not self.position:  # 检查是否已平仓
+                print(f"预测价格上涨，执行买入操作: 当前价格 {self.data.close[0]:.2f}")
+                self.buy(size=trade_amount / self.data.close[0])  # 计算买入数量并执行买入
+        elif direction < 0:  # 预测价格下跌
+            if self.position.size > 0:  # 如果持有多头仓位，先平仓
+                print(f"当前持有多头仓位，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
+                self.close()  # 平多头仓位
+            if not self.position:  # 检查是否已平仓
+                print(f"预测价格下跌，执行开空操作: 当前价格 {self.data.close[0]:.2f}")
+                self.sell(size=trade_amount / self.data.close[0])  # 计算卖出数量并执行开空单
+
+    def predict_direction(self):
+        # 使用模型预测未来1小时的方向
         close_price = [d['close'] for d in self.data_history[-self.params.timestamp:]]
         close_price_scaled = self.minmax.fit_transform(np.array(close_price).reshape(-1, 1)).flatten()
         input_data = np.column_stack((np.zeros(self.params.timestamp),  # 假设 Polarity, Sensitivity, Tweet_vol 为 0
@@ -73,125 +82,19 @@ class MyLSTMStrategy(bt.Strategy):
         prediction = self.modelnn.predict(input_data[np.newaxis, :, :])
         predicted_close_price_scaled = prediction[0, -1]
         predicted_close_price = self.minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
+
+        # 预测价格方向：上涨返回1，下跌返回-1
+        current_price = self.data.close[0]
+        direction = 1 if predicted_close_price > current_price else -1
+
         prediction_time = self.data.datetime.datetime(0) + timedelta(hours=1)  # 预测时间为当前时间+1小时
-        print(f"预测未来1小时的价格为: {predicted_close_price:.2f}, 预测时间: {prediction_time}")
-        return predicted_close_price, prediction_time
-
-    def handle_buy_signal(self, predicted_price, prediction_time):
-        buy_units = self.params.buy_amount / self.data.close[0]  # 计算买入单位
-        self.cash -= self.params.buy_amount
-        self.orders.append((self.data.close[0], buy_units, prediction_time))  # 记录每笔订单
-        self.states_buy.append(len(self.data_history))  # 记录买入点
-        print(f"买入操作: {buy_units:.6f} 单位，买入价格 {self.data.close[0]:.2f}, 持仓增加")
-
-        # 记录买入交易
-        self.trades.append({
-            'datetime': prediction_time,
-            'price': self.data.close[0],
-            'size': buy_units,
-            'action': 'buy'
-        })
-
-    def handle_sell_signal(self, predicted_price, prediction_time):
-        if not self.orders:
-            return  # 没有持仓，不进行卖出
-
-        # 按买入价格排序，优先卖出最低价的持仓
-        self.orders.sort(key=lambda x: x[0])
-
-        sell_order = self.orders.pop(0)  # 卖出价格最低的一笔订单
-        sell_units = sell_order[1]
-        sell_price = self.data.close[0]
-        self.cash += sell_units * sell_price
-        self.states_sell.append(len(self.data_history))  # 记录卖出点
-        print(f"卖出操作: {sell_units:.6f} 单位，卖出价格 {sell_price:.2f}, 持仓减少")
-
-        # 记录卖出交易
-        self.trades.append({
-            'datetime': prediction_time,
-            'price': sell_price,
-            'size': sell_units,
-            'action': 'sell'
-        })
+        print(f"预测未来1小时的方向为: {'上涨' if direction > 0 else '下跌'}, 预测时间: {prediction_time}")
+        return direction, prediction_time
 
     def stop(self):
-        # 打印最终投资组合价值
-        final_value = self.portfolio_value[-1]
+        # 打印最终资金
+        final_value = self.broker.getvalue()
         print(f"最终资金: {final_value:.2f}")
-
-        # 绘制完整价格线
-        plt.figure(figsize=(15, 5))
-        actual_prices = [d['close'] for d in self.data_history]
-        plt.plot(actual_prices, color='blue', lw=2, label='Actual Price')
-        plt.title('Complete Price Line')
-        plt.legend()
-        plt.show()
-
-        # 计算最大回撤
-        portfolio_value = np.array(self.portfolio_value)
-        running_max = np.maximum.accumulate(portfolio_value)
-        drawdown = (running_max - portfolio_value) / running_max
-        max_drawdown = np.max(drawdown)
-
-        print(f"最大回撤: {max_drawdown * 100:.2f}%")
-
-        # 计算胜率和总盈利
-        total_trades = len(self.trades) // 2
-        win_trades = sum([1 for i in range(1, len(self.trades), 2) if self.trades[i]['price'] > self.trades[i - 1]['price']])
-        win_rate = (win_trades / total_trades) * 100 if total_trades > 0 else 0
-        total_gains = final_value - self.params.initial_money
-        invest_return = (total_gains / self.params.initial_money) * 100
-
-        print(f"总盈利: {total_gains:.2f}")
-        print(f"收益率: {invest_return:.2f}%")
-        print(f"胜率: {win_rate:.2f}%")
-
-        # 绘制资金曲线
-        plt.figure(figsize=(15, 5))
-        plt.plot(portfolio_value, color='blue', lw=2, label='Portfolio Value')
-        plt.title(f'Portfolio Value Curve')
-        plt.legend()
-        plt.show()
-
-        # 绘制最大回撤曲线
-        plt.figure(figsize=(15, 5))
-        plt.plot(drawdown, color='red', lw=2, label='Max Drawdown')
-        plt.title('Max Drawdown Curve')
-        plt.legend()
-        plt.show()
-
-        valid_buy_indices = [i for i in self.states_buy if i < len(self.data_history)]
-        valid_sell_indices = [i for i in self.states_sell if i < len(self.data_history)]
-
-        # 绘制买入卖出信号
-        plt.figure(figsize=(15, 5))
-        plt.plot([d['close'] for d in self.data_history], color='r', lw=2., label='Close Price')
-        plt.plot(valid_buy_indices, [self.data_history[i]['close'] for i in valid_buy_indices], '^', markersize=10,
-                 color='m', label='buying signal')
-        plt.plot(valid_sell_indices, [self.data_history[i]['close'] for i in valid_sell_indices], 'v', markersize=10,
-                 color='k', label='selling signal')
-        plt.title(f'Trading Signals with Max Drawdown: {max_drawdown * 100:.2f}%')
-        plt.legend()
-        plt.show()
-
-        # 打印最终资金和持仓
-        print(f"最终资金: {self.cash:.2f}")
-        if self.orders:
-            for order in self.orders:
-                print(f"未平仓单: 买入价格 {order[0]:.2f}，数量 {order[1]:.6f}，买入时间 {order[2]}")
-
-        # 计算交易结果
-        total_profit = 0
-        for i in range(1, len(self.trades), 2):
-            buy_trade = self.trades[i - 1]
-            sell_trade = self.trades[i]
-            if buy_trade['action'] == 'buy' and sell_trade['action'] == 'sell':
-                profit = (sell_trade['price'] - buy_trade['price']) * buy_trade['size']
-                total_profit += profit
-                print(f"交易 {i // 2 + 1}: 买入价格 {buy_trade['price']:.2f}，卖出价格 {sell_trade['price']:.2f}，"
-                      f"利润 {profit:.2f}, 买入日期 {buy_trade['datetime']}, 卖出日期 {sell_trade['datetime']}")
-
-        print(f"总利润: {total_profit:.2f}")
 
 # 加载数据并初始化策略
 folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
@@ -211,13 +114,9 @@ for filename in os.listdir(folder_path):
 
 df_resampled = pd.concat(df_list)
 
-# 归一化只对 close 进行
-minmax = MinMaxScaler().fit(df_resampled[['close']].to_numpy().astype('float32'))
-
 # 打印数据预览
 print("数据预览:\n", df_resampled.head())
 import backtrader.analyzers as btanalyzers
-
 # 设置Cerebro并添加策略
 cerebro = bt.Cerebro()
 data = bt.feeds.PandasData(dataname=df_resampled)
@@ -226,4 +125,42 @@ cerebro.addstrategy(MyLSTMStrategy)
 cerebro.broker.setcash(10000.0)
 cerebro.broker.setcommission(commission=0.001)
 
-cerebro.run()
+# 添加分析器
+cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name='trade_analyzer')
+cerebro.addanalyzer(btanalyzers.DrawDown, _name='drawdown')
+cerebro.addanalyzer(btanalyzers.SQN, _name='sqn')
+cerebro.addanalyzer(btanalyzers.TimeReturn, _name='time_return')
+
+# 运行策略并获取分析结果
+results = cerebro.run()
+strategy = results[0]
+
+# 打印分析结果
+trade_analyzer = strategy.analyzers.trade_analyzer.get_analysis()
+drawdown = strategy.analyzers.drawdown.get_analysis()
+sqn = strategy.analyzers.sqn.get_analysis()
+time_return = strategy.analyzers.time_return.get_analysis()
+
+print("Trade Analysis:")
+print(f"总交易次数: {trade_analyzer.total.closed}")
+print(f"盈利交易次数: {trade_analyzer.won.total}")
+print(f"亏损交易次数: {trade_analyzer.lost.total}")
+print(f"胜率: {trade_analyzer.won.total / trade_analyzer.total.closed * 100:.2f}%")
+print(f"总盈利: {trade_analyzer.pnl.net.total:.2f}")
+print(f"最大单笔盈利: {trade_analyzer.won.pnl.max:.2f}")
+print(f"最大单笔亏损: {trade_analyzer.lost.pnl.max:.2f}")
+
+print("\nDrawdown Analysis:")
+print(f"最大回撤: {drawdown.max.drawdown:.2f}%")
+print(f"最大回撤金额: {drawdown.max.moneydown:.2f}")
+print(f"回撤持续时间: {drawdown.max.len} 根K线")
+
+print("\nSQN Analysis:")
+print(f"SQN (系统质量数): {sqn.sqn:.2f}")
+
+# print("\nTime Return Analysis:")
+# for period, ret in time_return.items():
+#     print(f"{period.capitalize()} Return: {ret:.2f}%")
+
+# 绘制策略表现
+cerebro.plot(style='candlestick')
