@@ -13,20 +13,23 @@ class MyLSTMStrategy(bt.Strategy):
         ('timestamp', 5),
         ('model_path', 'quant_model.h5'),
         ('initial_money', 10000),
-        # ('trade_amount', 500),  # 每次交易的固定金额
-        ('risk_per_trade', 0.02),  # 每次交易最大风险的百分比
+        ('risk_per_trade', 0.01),  # 每次交易最大风险的百分比
         ('atr_period', 14),  # ATR计算周期
-        ('atr_multiplier', 1.2),  # 动态ATR阈值的倍数
-        ('max_trade_size', 0.06),
-        ('stop_loss_multiplier',2),
+        ('atr_multiplier', 1),  # 动态ATR阈值的倍数
+        ('max_trade_size', 0.08),
+        ('stop_loss_multiplier',1.5),
         ('take_profit_multiplier', 3),
         ('rsi_period', 14),  # RSI 计算周期
-        ('rsi_overbought', 65),  # 超买阈值
-        ('rsi_oversold', 30),  # 超卖阈值
+        ('rsi_overbought', 75),  # 超买阈值
+        ('rsi_oversold', 25),  # 超卖阈值
 
         # ('ma_period', 100),  # 新增移动平均线周期
-        ('bollinger_period', 20),  # 布林带周期
-        ('bollinger_dev', 2)  # 布林带标准差
+        ('bollinger_period', 50),  # 布林带周期
+        ('bollinger_dev', 2),  # 布林带标准差
+
+        ('support_resistance_lookback', 200),  # 用于计算支撑和阻力的回看周期
+        ('support_resistance_threshold', 1),  # 支撑和阻力的最小测试次数
+        ('allow_short', False)  # 新增参数：允许做空
     )
 
     def __init__(self):
@@ -40,16 +43,18 @@ class MyLSTMStrategy(bt.Strategy):
         self.atr_sma = btind.SMA(self.atr, period=self.params.atr_period)
 
         self.rsi = btind.RelativeStrengthIndex(self.data, period=self.params.rsi_period)
-        # self.ma = btind.SimpleMovingAverage(self.data.close, period=self.params.ma_period)  # 移动平均线
         self.bollinger = btind.BollingerBands(self.data.close, period=self.params.bollinger_period,
                                               devfactor=self.params.bollinger_dev)  # 布林带
 
-
+        # self.sma_short = btind.SimpleMovingAverage(self.data.close, period=50)
+        # self.sma_long = btind.SimpleMovingAverage(self.data.close, period=200)
         self.order = None  # 用于跟踪挂单
         self.stop_order = None  # 用于存储止损订单
         self.take_profit_order = None  # 用于存储止盈订单
         # 用于存储所有交易的信息
         self.closed_trades = []
+
+
 
     def next(self):
         # 收集当前的数据点
@@ -68,21 +73,33 @@ class MyLSTMStrategy(bt.Strategy):
 
         # ATR过滤：仅在波动率高于动态阈值时执行交易
         if self.atr[0] < dynamic_atr_threshold:
-            print(f"波动率过低（ATR: {self.atr[0]:.6f}, 阈值: {dynamic_atr_threshold:.6f}），跳过交易。")
+            # print(f"波动率过低（ATR: {self.atr[0]:.6f}, 阈值: {dynamic_atr_threshold:.6f}），跳过交易。")
             return
 
+        # 确认支撑和阻力
+        support_level, resistance_level = self.calculate_support_resistance()
 
-        # 如果当前有持仓，检查是否需要取消已有的止盈止损挂单
+        # 如果支撑和阻力无法计算，则使用ATR止损
+        use_atr_stop_loss = False
+        if support_level is None or resistance_level is None:
+            print("支撑或阻力位未能有效确认，使用ATR止损。")
+            use_atr_stop_loss = True
+
+        # 检查是否有仓位且有止损单，如果当前价格达到止损价则平仓
         if self.position:
-            if self.stop_order:
-                self.cancel(self.stop_order)
-            if self.take_profit_order:
-                self.cancel(self.take_profit_order)
-
+            if self.stop_order:  # 确保止损订单存在
+                if self.position.size > 0:  # 多头持仓
+                    if self.data.low[0] <= self.stop_order.created.price:
+                        print(
+                            f"多头止损触发: 当前价格 {self.data.low[0]:.2f}, 止损价 {self.stop_order.created.price:.2f}")
+                        self.close()
+                elif self.position.size < 0:  # 空头持仓
+                    if self.data.high[0] >= self.stop_order.created.price:
+                        print(
+                            f"空头止损触发: 当前价格 {self.data.high[0]:.2f}, 止损价 {self.stop_order.created.price:.2f}")
+                        self.close()
         # 预测未来1小时的方向（上涨或下跌）
         direction, prediction_time = self.predict_direction()
-        current_cash = self.broker.get_cash()
-        # trade_amount = min(self.params.trade_amount, current_cash * self.params.max_trade_size)
 
         # 计算每次交易的最大风险金额
         current_cash = self.broker.get_cash()
@@ -97,44 +114,110 @@ class MyLSTMStrategy(bt.Strategy):
         max_trade_value = current_cash * self.params.max_trade_size
         trade_amount = min(trade_amount, max_trade_value / self.data.close[0])
 
-
         # 结合RSI、布林带和MA确认信号
-        if direction > 0:  # 预测价格上涨
-            if self.rsi[0] < self.params.rsi_oversold and self.data.close[0] < self.bollinger.bot :
-                # RSI低于超卖水平，价格在布林带下轨附近且价格高于MA（多头趋势）
-                if self.position.size < 0:  # 如果持有空头仓位，先平仓
-                    print(f"当前持有空头仓位，执行回补操作: 当前价格 {self.data.close[0]:.2f}")
-                    self.close()
-                print(f"预测价格上涨，执行买入操作: 当前价格 {self.data.close[0]:.2f},当前rsi {self.rsi[0]:.2f}")
-                self.order = self.buy(size=trade_amount )
+        if direction > 0 and self.rsi[0] < self.params.rsi_oversold and self.data.close[0] < self.bollinger.bot:
+            print(f"日期：{self.data.datetime.datetime(0)}")
+            if self.position.size < 0:
+                print(f"当前持有空头仓位，执行回补操作: 当前价格 {self.data.close[0]:.2f}")
+                self.close()
 
-        elif direction < 0:  # 预测价格下跌
-            if self.rsi[0] > self.params.rsi_overbought and self.data.close[0] > self.bollinger.top :
-                # RSI高于超买水平，价格在布林带上轨附近且价格低于MA（空头趋势）
-                if self.position.size > 0:  # 如果持有多头仓位，先平仓
-                    print(f"当前持有多头仓位，执行卖出操作: 当前价格 {self.data.close[0]:.2f},当前rsi {self.rsi[0]:.2f}")
-                    self.close()
+            print(f"预测价格上涨，执行买入操作: 当前价格 {self.data.close[0]:.2f}")
+
+            # 计算止盈和止损价格
+            if use_atr_stop_loss:
+                stop_loss_price = self.data.close[0] - self.atr[0] * self.params.stop_loss_multiplier
+                take_profit_price = self.data.close[0] + self.atr[0] * self.params.take_profit_multiplier
+            else:
+                stop_loss_price = support_level
+                take_profit_price = resistance_level
+
+            trade_amount = self.calculate_position_size(current_cash, stop_loss_price)
+
+            # 使用bracket order下单，同时设置市价单、止损和止盈
+            self.buy_bracket(
+                size=trade_amount,
+                price=self.data.close[0],  # 市价单价格
+                stopprice=stop_loss_price,  # 止损价格
+                limitprice=take_profit_price  # 止盈价格
+            )
+            print(f"当前持有多头仓位: 大小 {self.position.size}")
+
+        elif direction < 0 and self.rsi[0] > self.params.rsi_overbought and self.data.close[0] > self.bollinger.top:
+            print(f"日期：{self.data.datetime.datetime(0)}")
+            if self.position.size > 0:
+                print(f"当前持有多头仓位，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
+                self.close()
+
+            # 判断是否允许做空
+            if self.params.allow_short:
                 print(f"预测价格下跌，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
-                self.order = self.sell(size=trade_amount)
 
+                if use_atr_stop_loss:
+                    stop_loss_price = self.data.close[0] + self.atr[0] * self.params.stop_loss_multiplier
+                    take_profit_price = self.data.close[0] - self.atr[0] * self.params.take_profit_multiplier
+                else:
+                    stop_loss_price = resistance_level
+                    take_profit_price = support_level
 
-    def set_stop_loss(self, order):
-        """设置止损挂单"""
-        atr_value = self.atr[0]
-        stop_loss_price = order.executed.price - (atr_value * self.params.stop_loss_multiplier)
-        print(f"设置止损单：{stop_loss_price:.2f}")
-        self.stop_order = self.sell(size=order.executed.size, exectype=bt.Order.Stop, price=stop_loss_price)
+                trade_amount = self.calculate_position_size(current_cash, stop_loss_price)
+
+                # 使用bracket order下单，同时设置市价单、止损和止盈
+                self.sell_bracket(
+                    size=trade_amount,
+                    price=self.data.close[0],  # 市价单价格
+                    stopprice=stop_loss_price,  # 止损价格
+                    limitprice=take_profit_price  # 止盈价格
+                )
+                print(f"当前持有空头仓位: 大小 {self.position.size}")
+
+    def calculate_support_resistance(self):
+        """计算支撑和阻力位基于历史价格行为"""
+        recent_data = self.data_history[-self.params.support_resistance_lookback:]
+        high_prices = [d['high'] for d in recent_data]
+        low_prices = [d['low'] for d in recent_data]
+
+        # 确定支撑位
+        support_level = min(low_prices)
+        support_test_count = sum(1 for d in recent_data if d['low'] <= support_level)
+
+        # 确定阻力位
+        resistance_level = max(high_prices)
+        resistance_test_count = sum(1 for d in recent_data if d['high'] >= resistance_level)
+
+        # 确保支撑和阻力被足够多次测试
+        if support_test_count < self.params.support_resistance_threshold:
+            support_level = None  # 如果支撑位未被足够多次测试，则忽略
+        if resistance_test_count < self.params.support_resistance_threshold:
+            resistance_level = None  # 如果阻力位未被足够多次测试，则忽略
+
+        return support_level, resistance_level
+
+    def calculate_position_size(self, current_cash, stop_loss_price):
+        # 计算仓位大小
+        stop_loss_distance = abs(self.data.close[0] - stop_loss_price)
+        max_risk = current_cash * self.params.risk_per_trade
+        trade_amount = max_risk / stop_loss_distance
+        max_trade_value = current_cash * self.params.max_trade_size
+        return min(trade_amount, max_trade_value / self.data.close[0])
+
+    def set_stop_loss(self, order, stop_loss_price):
+        """设置止损挂单基于动态支撑和阻力位"""
+        if order.isbuy():
+            self.stop_order = self.sell(size=order.executed.size, exectype=bt.Order.Stop, price=stop_loss_price)
+        else:
+            self.stop_order = self.buy(size=order.executed.size, exectype=bt.Order.Stop, price=stop_loss_price)
+        print(f"设置止损挂单: {stop_loss_price:.2f}")
 
     def notify_order(self, order):
         if order.status in [order.Completed]:
             if order.isbuy():
                 print(f'BUY ORDER COMPLETED: {order.executed.size} @ {order.executed.price}')
-                # 在开仓订单执行后，设置止损
-                self.set_stop_loss(order)
             elif order.issell():
                 print(f'SELL ORDER COMPLETED: {order.executed.size} @ {order.executed.price}')
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            print('ORDER CANCELED/MARGIN/REJECTED')
+            print(f'ORDER CANCELED/MARGIN/REJECTED: {order.status}')
+        elif order.status in [order.Submitted, order.Accepted]:
+            print(f'ORDER {order.status}')
 
     def predict_direction(self):
         # 使用模型预测未来1小时的方向
@@ -153,7 +236,7 @@ class MyLSTMStrategy(bt.Strategy):
         direction = 1 if predicted_close_price > current_price else -1
 
         prediction_time = self.data.datetime.datetime(0) + timedelta(hours=1)  # 预测时间为当前时间+1小时
-        print(f"预测未来1小时的方向为: {'上涨' if direction > 0 else '下跌'}, 预测时间: {prediction_time}")
+        # print(f"预测未来1小时的方向为: {'上涨' if direction > 0 else '下跌'}, 预测时间: {prediction_time}")
         return direction, prediction_time
 
     def notify_trade(self, order):
@@ -189,7 +272,7 @@ class MyLSTMStrategy(bt.Strategy):
 
 # 加载数据并初始化策略
 folder_path = 'D:\\crypto-doge\\BTCUSDT-1h'
-# folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
+folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
 
 df_list = []
 
@@ -252,4 +335,4 @@ print("\nSQN Analysis:")
 print(f"SQN (系统质量数): {sqn.sqn:.2f}")
 
 # 绘制策略表现
-# cerebro.plot(style='candlestick')
+cerebro.plot(style='candlestick')

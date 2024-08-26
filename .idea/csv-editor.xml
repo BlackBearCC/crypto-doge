@@ -73,6 +73,13 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="\BTCUSDT-1h-2024-08-01-12\BTCUSDT-1h-2024-08-18.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="\BTCUSDT-5m\BTCUSDT-5m-2023-09.csv">
           <value>
             <Attribute>
