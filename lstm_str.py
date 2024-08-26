@@ -13,7 +13,7 @@ class MyLSTMStrategy(bt.Strategy):
         ('timestamp', 5),
         ('model_path', 'quant_model.h5'),
         ('initial_money', 10000),
-        ('trade_amount', 1000),  # 每次交易的固定金额
+        ('trade_amount', 200),  # 每次交易的固定金额
         ('atr_period', 14),  # ATR计算周期
         ('atr_multiplier', 1.2),  # 动态ATR阈值的倍数
         ('max_trade_size', 0.8),
@@ -22,6 +22,10 @@ class MyLSTMStrategy(bt.Strategy):
         ('rsi_period', 7),  # RSI 计算周期
         ('rsi_overbought', 60),  # 超买阈值
         ('rsi_oversold', 40),  # 超卖阈值
+
+        # ('ma_period', 100),  # 新增移动平均线周期
+        ('bollinger_period', 20),  # 布林带周期
+        ('bollinger_dev', 2)  # 布林带标准差
     )
 
     def __init__(self):
@@ -32,9 +36,13 @@ class MyLSTMStrategy(bt.Strategy):
         self.data_history = []
         # ATR相关
         self.atr = btind.AverageTrueRange(self.data, period=self.params.atr_period)
-        self.atr_sma = btind.SMA(self.atr, period=self.params.atr_period)  # 计算ATR的移动平均值
+        self.atr_sma = btind.SMA(self.atr, period=self.params.atr_period)
 
         self.rsi = btind.RelativeStrengthIndex(self.data, period=self.params.rsi_period)
+        # self.ma = btind.SimpleMovingAverage(self.data.close, period=self.params.ma_period)  # 移动平均线
+        self.bollinger = btind.BollingerBands(self.data.close, period=self.params.bollinger_period,
+                                              devfactor=self.params.bollinger_dev)  # 布林带
+
 
         self.order = None  # 用于跟踪挂单
         self.stop_order = None  # 用于存储止损订单
@@ -62,14 +70,6 @@ class MyLSTMStrategy(bt.Strategy):
             print(f"波动率过低（ATR: {self.atr[0]:.6f}, 阈值: {dynamic_atr_threshold:.6f}），跳过交易。")
             return
 
-        # 预测未来1小时的方向（上涨或下跌）
-        direction, prediction_time = self.predict_direction()
-
-        # 获取账户当前资金
-        current_cash = self.broker.get_cash()
-
-        # 限制交易规模
-        trade_amount = min(self.params.trade_amount, current_cash * self.params.max_trade_size)
 
         # 如果当前有持仓，检查是否需要取消已有的止盈止损挂单
         if self.position:
@@ -78,20 +78,31 @@ class MyLSTMStrategy(bt.Strategy):
             if self.take_profit_order:
                 self.cancel(self.take_profit_order)
 
-        # 信号过滤逻辑
+        # 预测未来1小时的方向（上涨或下跌）
+        direction, prediction_time = self.predict_direction()
+        current_cash = self.broker.get_cash()
+        trade_amount = min(self.params.trade_amount, current_cash * self.params.max_trade_size)
+
+
+        # 结合RSI、布林带和MA确认信号
         if direction > 0:  # 预测价格上涨
-            if self.rsi[0] < self.params.rsi_oversold:  # RSI 处于超卖状态
+            if self.rsi[0] < self.params.rsi_oversold and self.data.close[0] < self.bollinger.bot :
+                # RSI低于超卖水平，价格在布林带下轨附近且价格高于MA（多头趋势）
                 if self.position.size < 0:  # 如果持有空头仓位，先平仓
                     print(f"当前持有空头仓位，执行回补操作: 当前价格 {self.data.close[0]:.2f}")
-                    self.close()  # 平掉空头仓位
+                    self.close()
                 print(f"预测价格上涨，执行买入操作: 当前价格 {self.data.close[0]:.2f}")
                 self.order = self.buy(size=trade_amount / self.data.close[0])
 
         elif direction < 0:  # 预测价格下跌
-            if self.rsi[0] > self.params.rsi_overbought:  # RSI 处于超买状态
+            if self.rsi[0] > self.params.rsi_overbought and self.data.close[0] > self.bollinger.top :
+                # RSI高于超买水平，价格在布林带上轨附近且价格低于MA（空头趋势）
                 if self.position.size > 0:  # 如果持有多头仓位，先平仓
                     print(f"当前持有多头仓位，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
-                    self.close()  # 平多头仓位
+                    self.close()
+                print(f"预测价格下跌，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
+                self.order = self.sell(size=trade_amount / self.data.close[0])
+
 
     def set_stop_loss(self, order):
         """设置止损挂单"""
@@ -225,4 +236,4 @@ print("\nSQN Analysis:")
 print(f"SQN (系统质量数): {sqn.sqn:.2f}")
 
 # 绘制策略表现
-# cerebro.plot(style='candlestick')
+cerebro.plot(style='candlestick')
