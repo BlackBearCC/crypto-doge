@@ -13,10 +13,15 @@ class MyLSTMStrategy(bt.Strategy):
         ('timestamp', 5),
         ('model_path', 'quant_model.h5'),
         ('initial_money', 10000),
-        ('trade_amount', 200),  # 每次交易的固定金额
-        ('atr_period', 14),  # ATR计算周期
+        ('trade_amount', 1000),  # 每次交易的固定金额
+        ('atr_period', 7),  # ATR计算周期
         ('atr_threshold', 500),  # ATR阈值
-        ('max_trade_size', 0.5),
+        ('max_trade_size', 0.8),
+        ('stop_loss_multiplier',2),
+        ('take_profit_multiplier', 3),
+        ('rsi_period', 7),  # RSI 计算周期
+        ('rsi_overbought', 60),  # 超买阈值
+        ('rsi_oversold', 40),  # 超卖阈值
     )
 
     def __init__(self):
@@ -26,7 +31,13 @@ class MyLSTMStrategy(bt.Strategy):
         self.minmax = MinMaxScaler()
         self.data_history = []
         self.atr = btind.AverageTrueRange(self.data, period=self.params.atr_period)
+        self.rsi = btind.RelativeStrengthIndex(self.data, period=self.params.rsi_period)
+
         self.order = None  # 用于跟踪挂单
+        self.stop_order = None  # 用于存储止损订单
+        self.take_profit_order = None  # 用于存储止盈订单
+        # 用于存储所有交易的信息
+        self.closed_trades = []
 
     def next(self):
         # 收集当前的数据点
@@ -55,21 +66,45 @@ class MyLSTMStrategy(bt.Strategy):
         # 限制交易规模
         trade_amount = min(self.params.trade_amount, current_cash * self.params.max_trade_size)
 
-        # 平仓操作并开新仓
+        # 如果当前有持仓，检查是否需要取消已有的止盈止损挂单
+        if self.position:
+            if self.stop_order:
+                self.cancel(self.stop_order)
+            if self.take_profit_order:
+                self.cancel(self.take_profit_order)
+
+        # 信号过滤逻辑
         if direction > 0:  # 预测价格上涨
-            if self.position.size < 0:  # 如果持有空头仓位，先平仓
-                print(f"当前持有空头仓位，执行回补操作: 当前价格 {self.data.close[0]:.2f}")
-                self.close()  # 平空头仓位
-            if not self.position:  # 检查是否已平仓
+            if self.rsi[0] < self.params.rsi_oversold:  # RSI 处于超卖状态
+                if self.position.size < 0:  # 如果持有空头仓位，先平仓
+                    print(f"当前持有空头仓位，执行回补操作: 当前价格 {self.data.close[0]:.2f}")
+                    self.close()  # 平掉空头仓位
                 print(f"预测价格上涨，执行买入操作: 当前价格 {self.data.close[0]:.2f}")
-                self.buy(size=trade_amount / self.data.close[0])  # 计算买入数量并执行买入
+                self.order = self.buy(size=trade_amount / self.data.close[0])
+
         elif direction < 0:  # 预测价格下跌
-            if self.position.size > 0:  # 如果持有多头仓位，先平仓
-                print(f"当前持有多头仓位，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
-                self.close()  # 平多头仓位
-            if not self.position:  # 检查是否已平仓
-                print(f"预测价格下跌，执行开空操作: 当前价格 {self.data.close[0]:.2f}")
-                self.sell(size=trade_amount / self.data.close[0])  # 计算卖出数量并执行开空单
+            if self.rsi[0] > self.params.rsi_overbought:  # RSI 处于超买状态
+                if self.position.size > 0:  # 如果持有多头仓位，先平仓
+                    print(f"当前持有多头仓位，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
+                    self.close()  # 平多头仓位
+
+    def set_stop_loss(self, order):
+        """设置止损挂单"""
+        atr_value = self.atr[0]
+        stop_loss_price = order.executed.price - (atr_value * self.params.stop_loss_multiplier)
+        print(f"设置止损单：{stop_loss_price:.2f}")
+        self.stop_order = self.sell(size=order.executed.size, exectype=bt.Order.Stop, price=stop_loss_price)
+
+    def notify_order(self, order):
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                print(f'BUY ORDER COMPLETED: {order.executed.size} @ {order.executed.price}')
+                # 在开仓订单执行后，设置止损
+                self.set_stop_loss(order)
+            elif order.issell():
+                print(f'SELL ORDER COMPLETED: {order.executed.size} @ {order.executed.price}')
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            print('ORDER CANCELED/MARGIN/REJECTED')
 
     def predict_direction(self):
         # 使用模型预测未来1小时的方向
@@ -91,13 +126,39 @@ class MyLSTMStrategy(bt.Strategy):
         print(f"预测未来1小时的方向为: {'上涨' if direction > 0 else '下跌'}, 预测时间: {prediction_time}")
         return direction, prediction_time
 
+    def notify_trade(self, order):
+        if order.isclosed:
+            # 将交易信息存储在 closed_trades 列表中
+            self.closed_trades.append({
+                'open_date': order.open_datetime(),
+                'close_date': order.close_datetime(),
+                'duration': order.barlen,
+                'open_price': order.price,  # 使用 trade.price 记录开仓价格
+                'close_price': order.price,  # 使用 trade.price 记录平仓价格
+                'size': order.size,
+                'gross_profit': order.pnl,
+                'net_profit': order.pnlcomm
+            })
+
+
     def stop(self):
-        # 打印最终资金
-        final_value = self.broker.getvalue()
-        print(f"最终资金: {final_value:.2f}")
+        print(f"Final Portfolio Value: {self.broker.getvalue():.2f}")
+
+        # 统一打印所有交易的信息
+        print("\nClosed Trades:")
+        for i, trade in enumerate(self.closed_trades, 1):
+            print(f"Trade {i}:")
+            print(f" - Open Date: {trade['open_date']}")
+            print(f" - Close Date: {trade['close_date']}")
+            print(f" - Duration: {trade['duration']} bars")
+            print(f" - Open Price: {trade['open_price']:.2f}")
+            print(f" - Close Price: {trade['close_price']:.2f}")
+            print(f" - Size: {trade['size']}")
+            print(f" - Gross Profit: {trade['gross_profit']:.2f}")
+            print(f" - Net Profit: {trade['net_profit']:.2f}")
 
 # 加载数据并初始化策略
-folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
+folder_path = 'D:\\crypto-doge\\BTCUSDT-1h'
 df_list = []
 
 # 遍历文件夹中的所有CSV文件
@@ -158,9 +219,5 @@ print(f"回撤持续时间: {drawdown.max.len} 根K线")
 print("\nSQN Analysis:")
 print(f"SQN (系统质量数): {sqn.sqn:.2f}")
 
-# print("\nTime Return Analysis:")
-# for period, ret in time_return.items():
-#     print(f"{period.capitalize()} Return: {ret:.2f}%")
-
 # 绘制策略表现
-cerebro.plot(style='candlestick')
+# cerebro.plot(style='candlestick')
