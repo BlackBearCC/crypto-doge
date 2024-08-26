@@ -14,8 +14,8 @@ class MyLSTMStrategy(bt.Strategy):
         ('model_path', 'quant_model.h5'),
         ('initial_money', 10000),
         ('trade_amount', 1000),  # 每次交易的固定金额
-        ('atr_period', 7),  # ATR计算周期
-        ('atr_threshold', 500),  # ATR阈值
+        ('atr_period', 14),  # ATR计算周期
+        ('atr_multiplier', 1.2),  # 动态ATR阈值的倍数
         ('max_trade_size', 0.8),
         ('stop_loss_multiplier',2),
         ('take_profit_multiplier', 3),
@@ -30,7 +30,10 @@ class MyLSTMStrategy(bt.Strategy):
 
         self.minmax = MinMaxScaler()
         self.data_history = []
+        # ATR相关
         self.atr = btind.AverageTrueRange(self.data, period=self.params.atr_period)
+        self.atr_sma = btind.SMA(self.atr, period=self.params.atr_period)  # 计算ATR的移动平均值
+
         self.rsi = btind.RelativeStrengthIndex(self.data, period=self.params.rsi_period)
 
         self.order = None  # 用于跟踪挂单
@@ -51,10 +54,12 @@ class MyLSTMStrategy(bt.Strategy):
 
         if len(self.data_history) < self.params.timestamp + self.params.atr_period:
             return
+            # 动态调整ATR阈值
+        dynamic_atr_threshold = self.atr_sma[0] * self.params.atr_multiplier
 
-        # ATR过滤：仅在波动率高于阈值时执行交易
-        if self.atr[0] < self.params.atr_threshold:
-            print(f"波动率过低（ATR: {self.atr[0]:.6f}），跳过交易。")
+        # ATR过滤：仅在波动率高于动态阈值时执行交易
+        if self.atr[0] < dynamic_atr_threshold:
+            print(f"波动率过低（ATR: {self.atr[0]:.6f}, 阈值: {dynamic_atr_threshold:.6f}），跳过交易。")
             return
 
         # 预测未来1小时的方向（上涨或下跌）
