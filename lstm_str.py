@@ -13,15 +13,16 @@ class MyLSTMStrategy(bt.Strategy):
         ('timestamp', 5),
         ('model_path', 'quant_model.h5'),
         ('initial_money', 10000),
-        ('trade_amount', 200),  # 每次交易的固定金额
+        # ('trade_amount', 500),  # 每次交易的固定金额
+        ('risk_per_trade', 0.02),  # 每次交易最大风险的百分比
         ('atr_period', 14),  # ATR计算周期
         ('atr_multiplier', 1.2),  # 动态ATR阈值的倍数
-        ('max_trade_size', 0.8),
+        ('max_trade_size', 0.06),
         ('stop_loss_multiplier',2),
         ('take_profit_multiplier', 3),
-        ('rsi_period', 7),  # RSI 计算周期
-        ('rsi_overbought', 60),  # 超买阈值
-        ('rsi_oversold', 40),  # 超卖阈值
+        ('rsi_period', 14),  # RSI 计算周期
+        ('rsi_overbought', 65),  # 超买阈值
+        ('rsi_oversold', 30),  # 超卖阈值
 
         # ('ma_period', 100),  # 新增移动平均线周期
         ('bollinger_period', 20),  # 布林带周期
@@ -81,7 +82,20 @@ class MyLSTMStrategy(bt.Strategy):
         # 预测未来1小时的方向（上涨或下跌）
         direction, prediction_time = self.predict_direction()
         current_cash = self.broker.get_cash()
-        trade_amount = min(self.params.trade_amount, current_cash * self.params.max_trade_size)
+        # trade_amount = min(self.params.trade_amount, current_cash * self.params.max_trade_size)
+
+        # 计算每次交易的最大风险金额
+        current_cash = self.broker.get_cash()
+        max_risk = current_cash * self.params.risk_per_trade
+
+        # 动态计算止损价格（假设使用ATR为止损标准）
+        atr_value = self.atr[0]
+        stop_loss_distance = atr_value * self.params.stop_loss_multiplier
+        trade_amount = max_risk / stop_loss_distance  # 根据风险和止损距离计算仓位大小
+
+        # 保证仓位大小不超过账户资金的某一比例（例如最大80%）
+        max_trade_value = current_cash * self.params.max_trade_size
+        trade_amount = min(trade_amount, max_trade_value / self.data.close[0])
 
 
         # 结合RSI、布林带和MA确认信号
@@ -91,17 +105,17 @@ class MyLSTMStrategy(bt.Strategy):
                 if self.position.size < 0:  # 如果持有空头仓位，先平仓
                     print(f"当前持有空头仓位，执行回补操作: 当前价格 {self.data.close[0]:.2f}")
                     self.close()
-                print(f"预测价格上涨，执行买入操作: 当前价格 {self.data.close[0]:.2f}")
-                self.order = self.buy(size=trade_amount / self.data.close[0])
+                print(f"预测价格上涨，执行买入操作: 当前价格 {self.data.close[0]:.2f},当前rsi {self.rsi[0]:.2f}")
+                self.order = self.buy(size=trade_amount )
 
         elif direction < 0:  # 预测价格下跌
             if self.rsi[0] > self.params.rsi_overbought and self.data.close[0] > self.bollinger.top :
                 # RSI高于超买水平，价格在布林带上轨附近且价格低于MA（空头趋势）
                 if self.position.size > 0:  # 如果持有多头仓位，先平仓
-                    print(f"当前持有多头仓位，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
+                    print(f"当前持有多头仓位，执行卖出操作: 当前价格 {self.data.close[0]:.2f},当前rsi {self.rsi[0]:.2f}")
                     self.close()
                 print(f"预测价格下跌，执行卖出操作: 当前价格 {self.data.close[0]:.2f}")
-                self.order = self.sell(size=trade_amount / self.data.close[0])
+                self.order = self.sell(size=trade_amount)
 
 
     def set_stop_loss(self, order):
@@ -175,6 +189,8 @@ class MyLSTMStrategy(bt.Strategy):
 
 # 加载数据并初始化策略
 folder_path = 'D:\\crypto-doge\\BTCUSDT-1h'
+# folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
+
 df_list = []
 
 # 遍历文件夹中的所有CSV文件
@@ -236,4 +252,4 @@ print("\nSQN Analysis:")
 print(f"SQN (系统质量数): {sqn.sqn:.2f}")
 
 # 绘制策略表现
-cerebro.plot(style='candlestick')
+# cerebro.plot(style='candlestick')
