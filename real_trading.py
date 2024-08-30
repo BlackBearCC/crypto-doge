@@ -240,7 +240,7 @@ def view_trade_history(client, symbol, limit=100):
 
 # 示例用法，查看BTCUSDT交易对的历史记录
 # trade_history = view_trade_history(client, symbol="BTCUSDT", limit=50)
-def get_realtime_data(client, symbol, interval='1h', lookback='3000'):
+def get_realtime_data(client, symbol, interval='5m', lookback='3000'):
     """从Binance获取实时数据"""
     klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
     df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume',
@@ -258,9 +258,7 @@ def predict_future(last_data, modelnn, minmax, timestamp, future_hours=14):
     """预测未来价格"""
     future_predictions = []
     close_price = last_data[-timestamp:]
-    # 使用历史数据进行fit
     minmax.fit(np.array(close_price).reshape(-1, 1))
-
     close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
 
     for _ in range(future_hours):
@@ -347,8 +345,7 @@ def wait_until_next_hour():
     logging.info(f"等待 {sleep_time} 秒，直到下一个整点 {next_hour.strftime('%Y-%m-%d %H:%M:%S')}")
     time.sleep(sleep_time)
 def run_strategy():
-    global cash, current_inventory, states_buy, states_sell, portfolio_value, data_history, trades,short_inventory
-
+   
     logging.info("开始运行策略...")
     # 获取实时数据
     df = get_realtime_data(client, symbol)
@@ -356,138 +353,94 @@ def run_strategy():
     logging.info("获取实时数据成功:" + str(data_history))
 
     while True:
-        # 每小时获取一次新数据
-        new_data = get_realtime_data(client, symbol, lookback='1')
-        new_data_record = new_data.reset_index().to_dict('records')[0]  # 保留 'open_time'
-        data_history.append(new_data_record)
-
+        # 获取实时数据
+        df = get_realtime_data(client, symbol)
+        
         # 进行未来指定窗口的预测
-        future_prices = predict_future([d['close'] for d in data_history[-timestamp:]], modelnn, minmax, timestamp,
-                                       future_hours=trend_window)
-        # 计算预测的未来时间
-        future_datetimes = pd.date_range(data_history[-1]['open_time'] + timedelta(hours=1), periods=trend_window,
-                                         freq='H')
-
-        # 提取历史数据
-        historical_prices = [d['close'] for d in data_history[-trend_window:]]
-        historical_datetimes = pd.date_range(data_history[-trend_window]['open_time'], periods=trend_window, freq='H')
-
-        # 合并历史数据和预测数据进行波峰波谷识别
-        combined_prices = np.concatenate((historical_prices, future_prices))
-        combined_datetimes = np.concatenate((historical_datetimes, future_datetimes))
-        peaks, valleys = find_peaks(combined_prices)[0], find_peaks(-combined_prices)[0]
-
-        # 绘制历史和预测的价格以及波峰波谷
-        plot_predictions(historical_datetimes, historical_prices, future_datetimes, future_prices, peaks, valleys)
-
+        future_prices = predict_future(df['close'].values, modelnn, minmax, timestamp, future_hours=trend_window)
+        
         # 获取最近的收盘价
-        current_price = data_history[-1]['close']
-        current_time = data_history[-1]['open_time']
+        current_price = df['close'].iloc[-1]
+        
+        # 计算RSI (这里需要添加RSI计算逻辑)
+        rsi_5m = calculate_rsi(df, period=14)  # 假设使用14期RSI
+        rsi_15m = calculate_rsi(df.resample('15T').last(), period=14)
+        rsi_30m = calculate_rsi(df.resample('30T').last(), period=14)
+        
+        rsi_average = (rsi_5m.iloc[-1] + rsi_15m.iloc[-1] + rsi_30m.iloc[-1]) / 3
+        
+        # 动态阈值计算
+        predicted_change = future_prices[-1] - current_price
+        buy_threshold, sell_threshold = dynamic_threshold(predicted_change, 30, 70)
+        
+        # 记录详细的交易信息
+        logging.info(f"当前时间: {datetime.now()}")
+        logging.info(f"当前价格: {current_price:.2f}")
+        logging.info(f"预测价格变化: {predicted_change:.2f}")
+        logging.info(f"RSI (5分钟): {rsi_5m.iloc[-1]:.2f}")
+        logging.info(f"RSI (15分钟): {rsi_15m.iloc[-1]:.2f}")
+        logging.info(f"RSI (30分钟): {rsi_30m.iloc[-1]:.2f}")
+        logging.info(f"RSI 平均值: {rsi_average:.2f}")
+        logging.info(f"买入阈值: {buy_threshold:.2f}")
+        logging.info(f"卖出阈值: {sell_threshold:.2f}")
+        
+        # 交易逻辑
+        if (rsi_5m.iloc[-1] < buy_threshold and rsi_15m.iloc[-1] < buy_threshold and 
+            rsi_30m.iloc[-1] < buy_threshold and rsi_average < buy_threshold):
+            # 执行买入
+            quantity = buy_amount / current_price
+            order = execute_trade(client, symbol, "BUY", quantity)
+            if order:
+                logging.info(f"买入信号触发 - 价格: {current_price:.2f}, 数量: {quantity:.4f}")
+                logging.info(f"买入订单详情: {order}")
+            else:
+                logging.error("买入订单执行失败")
+        
+        elif (rsi_5m.iloc[-1] > sell_threshold and rsi_15m.iloc[-1] > sell_threshold and 
+              rsi_30m.iloc[-1] > sell_threshold and rsi_average > sell_threshold):
+            # 执行卖出
+            quantity = max_sell
+            order = execute_trade(client, symbol, "SELL", quantity)
+            if order:
+                logging.info(f"卖出信号触发 - 价格: {current_price:.2f}, 数量: {quantity:.4f}")
+                logging.info(f"卖出订单详情: {order}")
+            else:
+                logging.error("卖出订单执行失败")
+        
+        else:
+            logging.info("当前不满足交易条件，继续观察")
+        
+        # 等待一段时间再进行下一次检查
+        logging.info("等待5分钟进行下一次检查...")
+        time.sleep(300)  # 每5分钟检查一次
 
-        # 查找最近的波谷和波峰
-        recent_valley_index = valleys[-1] if len(valleys) > 0 else None
-        recent_peak_index = peaks[-1] if len(peaks) > 0 else None
+def calculate_rsi(data, period=14):
+    """计算RSI"""
+    delta = data['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-        if recent_valley_index is not None:
-            recent_valley_price = combined_prices[recent_valley_index]
-            recent_valley_time = combined_datetimes[recent_valley_index]
+def normalize(value, min_value, max_value):
+    """归一化函数"""
+    return 2 * (value - min_value) / (max_value - min_value) - 1
 
-        if recent_peak_index is not None:
-            recent_peak_price = combined_prices[recent_peak_index]
-            recent_peak_time = combined_datetimes[recent_peak_index]
-
-        # 判断波峰和波谷的价差是否大于800点
-        if recent_valley_index is not None and recent_peak_index is not None:
-            price_difference = abs(recent_peak_price - recent_valley_price)
-            logging.info(f"波峰和波谷之间的价差为: {price_difference}")
-
-            if price_difference < 800:
-                logging.info("波峰和波谷之间的价差小于800点，未执行交易。")
-                wait_until_next_hour()
-                continue
-
-        # 买入（多头）逻辑：当前时间处于波谷区间内，且价差大于800点
-        if recent_valley_index is not None and recent_valley_time <= current_time <= (recent_valley_time + timedelta(hours=1)):
-            if current_inventory == 0 and cash >= buy_amount:
-                logging.info(f"当前价格 {current_price} 处于波谷区间，执行买入操作。")
-                buy_price = current_price
-                buy_units = buy_amount / buy_price
-                cash -= buy_amount
-                current_inventory += buy_units
-                order_id = execute_trade(client, symbol, "BUY", buy_units)
-                states_buy.append({
-                    'datetime': current_time,
-                    'price': buy_price,
-                    'size': buy_units,
-                    'order_id': order_id,
-                    'action': 'buy'
-                })
-                trades.append(states_buy[-1])
-
-        # 卖出（平仓）逻辑：当前时间处于波峰区间内，且价差大于800点
-        elif recent_peak_index is not None and recent_peak_time <= current_time <= (recent_peak_time + timedelta(hours=1)):
-            if current_inventory > 0:
-                logging.info(f"当前价格 {current_price} 处于波峰区间，执行卖出操作。")
-                sell_price = current_price
-                sell_units = min(current_inventory, max_sell)
-                cash += sell_units * sell_price
-                current_inventory -= sell_units
-                order_id = execute_trade(client, symbol, "SELL", sell_units)
-                states_sell.append({
-                    'datetime': current_time,
-                    'price': sell_price,
-                    'size': sell_units,
-                    'order_id': order_id,
-                    'action': 'sell'
-                })
-                trades.append(states_sell[-1])
-
-        # 做空逻辑：在波峰处开空单
-        if recent_peak_index is not None and recent_peak_time <= current_time <= (recent_peak_time + timedelta(hours=1)):
-            if current_inventory == 0 and short_inventory == 0 and cash >= buy_amount:
-                logging.info(f"当前价格 {current_price} 处于波峰区间，执行做空操作。")
-                short_price = current_price
-                short_units = buy_amount / short_price
-                cash += buy_amount
-                short_inventory += short_units
-                order_id = execute_trade(client, symbol, "SELL", short_units)
-                states_sell.append({
-                    'datetime': current_time,
-                    'price': short_price,
-                    'size': short_units,
-                    'order_id': order_id,
-                    'action': 'short'
-                })
-                trades.append(states_sell[-1])
-
-        # 平空逻辑：在波谷处平仓（买入）
-        elif recent_valley_index is not None and recent_valley_time <= current_time <= (recent_valley_time + timedelta(hours=1)):
-            if short_inventory > 0:
-                logging.info(f"当前价格 {current_price} 处于波谷区间，执行平空操作。")
-                cover_price = current_price
-                cover_units = short_inventory
-                cash -= cover_units * cover_price
-                short_inventory -= cover_units
-                order_id = execute_trade(client, symbol, "BUY", cover_units)
-                states_buy.append({
-                    'datetime': current_time,
-                    'price': cover_price,
-                    'size': cover_units,
-                    'order_id': order_id,
-                    'action': 'cover'
-                })
-                trades.append(states_buy[-1])
-
-
-        current_portfolio_value = cash + current_inventory * data_history[-1]['close']
-        portfolio_value.append(current_portfolio_value)
-        logging.info("Current Portfolio Value: %.2f", current_portfolio_value)
-
-        # 记录账户信息
-        log_account_info(client)
-
-        # 等待直到下一个整点
-        wait_until_next_hour()
-
+def dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold):
+    """动态调整RSI阈值"""
+    normalized_predicted_change = normalize(predicted_change, -2000, 2000)
+    adjustment_factor = 50
+    weight = 0.6
+    if normalized_predicted_change > 0:
+        buy_threshold = base_buy_threshold + adjustment_factor * normalized_predicted_change
+        sell_threshold = base_sell_threshold + adjustment_factor * normalized_predicted_change * weight
+        logging.info(f"买入阈值: {buy_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor:.2f}")
+        logging.info(f"卖出阈值: {sell_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor*weight:.2f}")
+    else:
+        buy_threshold = base_buy_threshold - adjustment_factor * normalized_predicted_change * weight
+        sell_threshold = base_sell_threshold - adjustment_factor * normalized_predicted_change
+        logging.info(f"买入阈值: {buy_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor*weight:.2f}")
+        logging.info(f"卖出阈值: {sell_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor:.2f}")
+    return buy_threshold, sell_threshold
 
 run_strategy()
