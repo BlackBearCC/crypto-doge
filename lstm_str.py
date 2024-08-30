@@ -272,7 +272,7 @@ class MyLSTMStrategy(bt.Strategy):
 
 # 加载数据并初始化策略
 folder_path = 'D:\\crypto-doge\\BTCUSDT-1h'
-folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
+# folder_path = 'D:\\crypto-doge\\BTCUSDT-1h-2024-08-01-12'
 
 df_list = []
 
