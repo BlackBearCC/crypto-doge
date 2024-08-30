@@ -234,7 +234,7 @@ if __name__ == '__main__':
         combined_df = read_and_combine_csv(dir_path)
         print(f"{timeframe} 数据点数量: {len(combined_df)}")
         todate = datetime.datetime.now()
-        fromdate = todate - datetime.timedelta(days=240)  # 使用4个月的数据
+        fromdate = todate - datetime.timedelta(days=120)
         data = bt.feeds.PandasData(dataname=combined_df, fromdate=fromdate, todate=todate)
 
         if timeframe == '5m':
