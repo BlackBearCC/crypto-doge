@@ -1,6 +1,6 @@
 import ccxt
 import pandas as pd
-import backtrader as bt
+import backtrader_test as bt
 import backtrader.feeds as btfeeds
 import datetime
 # 使用ccxt获取数据

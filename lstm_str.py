@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 from sklearn.preprocessing import MinMaxScaler
-import backtrader as bt
+import backtrader_test as bt
 import matplotlib.pyplot as plt
 import backtrader.indicators as btind
 

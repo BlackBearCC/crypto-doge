@@ -46,6 +46,7 @@ def get_realtime_data(client, symbol, interval='1h', lookback='3000'):
     df['open_time'] = df['open_time'].dt.tz_localize('UTC').dt.tz_convert('Asia/Shanghai')
     df.set_index('open_time', inplace=True)
     df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    print(df.head)
     return df
 
 def predict_future(last_data, modelnn, minmax, timestamp, future_hours=14):

@@ -1,8 +1,10 @@
 import os
+import threading
 import time
 import numpy as np
 import pandas as pd
 from binance.client import Client
+from prompt_toolkit import Application
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -14,6 +16,8 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 import logging
+from telegram import Update, Bot
+from telegram.ext import Updater, CommandHandler, CallbackContext
 
 # 设置日志记录，并添加控制台输出
 logging.basicConfig(level=logging.INFO,
@@ -22,6 +26,15 @@ logging.basicConfig(level=logging.INFO,
                         logging.FileHandler('trading_log.log'),  # 写入文件
                         logging.StreamHandler()  # 输出到控制台
                     ])
+
+# Telegram 机器人配置
+TELEGRAM_TOKEN = '7516595825:AAHgdjEqJcGvOCojTs7-ZcMuW-G142157jg'
+CHAT_ID = 'YOUR_CHAT_ID'
+bot = Bot(token=TELEGRAM_TOKEN)
+def send_telegram_message(message):
+    """发送消息到Telegram"""
+    bot.send_message(chat_id=CHAT_ID, text=message)
+
 def log_account_info(client):
     """记录账户信息"""
     try:
@@ -48,6 +61,8 @@ def log_account_info(client):
 
     except Exception as e:
         logging.error("获取账户信息失败: %s", str(e))
+
+
 
 
 def log_order_details(order):
@@ -138,6 +153,8 @@ peaks_all = []
 valleys_all = []
 future_datetimes_all = []
 processed_trades = set()
+
+atr = 14
 
 symbol = "BTCUSDT"  # 交易对
 
@@ -309,6 +326,52 @@ def execute_trade(client, symbol, side, quantity, price=None, type='MARKET'):
 
             # 记录订单详细信息
         log_order_details(order)
+              # 设置止盈止损
+        if side == 'BUY':
+            stop_price = price - atr * atr_multiplier * 0.5
+            take_profit_price = price + atr * atr_multiplier
+            client.create_order(
+                symbol=symbol,
+                side='SELL',
+                type='STOP_LOSS_LIMIT',
+                timeInForce='GTC',
+                quantity=quantity,
+                stopPrice=str(stop_price),
+                price=str(stop_price)
+            )
+            client.create_order(
+                symbol=symbol,
+                side='SELL',
+                type='TAKE_PROFIT_LIMIT',
+                timeInForce='GTC',
+                quantity=quantity,
+                stopPrice=str(take_profit_price),
+                price=str(take_profit_price)
+            )
+        elif side == 'SELL':
+            stop_price = price + atr * atr_multiplier * 0.5
+            take_profit_price = price - atr * atr_multiplier
+            client.create_order(
+                symbol=symbol,
+                side='BUY',
+                type='STOP_LOSS_LIMIT',
+                timeInForce='GTC',
+                quantity=quantity,
+                stopPrice=str(stop_price),
+                price=str(stop_price)
+            )
+            client.create_order(
+                symbol=symbol,
+                side='BUY',
+                type='TAKE_PROFIT_LIMIT',
+                timeInForce='GTC',
+                quantity=quantity,
+                stopPrice=str(take_profit_price),
+                price=str(take_profit_price)
+            )
+        
+        # 发送交易信息到Telegram
+        send_telegram_message(f"交易执行: {side} {quantity} {symbol} @ {price}")
         return order
     except Exception as e:
         logging.error("Failed to place %s order: %s", side, str(e))
@@ -359,6 +422,42 @@ def wait_until_next_hour():
     sleep_time = (next_hour - now).total_seconds()
     logging.info(f"等待 {sleep_time} 秒，直到下一个整点 {next_hour.strftime('%Y-%m-%d %H:%M:%S')}")
     time.sleep(sleep_time)
+
+# 全局变量，用于存储最新的预测和阈值信息
+latest_prediction_info = {}
+
+def update_latest_prediction_info(current_time, current_price, predicted_change, rsi_5m, rsi_15m, rsi_30m, rsi_average, buy_threshold, sell_threshold):
+    """更新最新的预测和阈值信息"""
+    global latest_prediction_info
+    latest_prediction_info = {
+        "current_time": current_time,
+        "current_price": current_price,
+        "predicted_change": predicted_change,
+        "rsi_5m": rsi_5m,
+        "rsi_15m": rsi_15m,
+        "rsi_30m": rsi_30m,
+        "rsi_average": rsi_average,
+        "buy_threshold": buy_threshold,
+        "sell_threshold": sell_threshold
+    }
+
+# 在记录详细的交易信息时，更新最新的预测和阈值信息
+def log_trade_info(current_time, current_price, predicted_change, rsi_5m, rsi_15m, rsi_30m, rsi_average, buy_threshold, sell_threshold):
+    """记录详细的交易信息"""
+    logging.info(f"当前时间: {current_time}")
+    logging.info(f"当前价格: {current_price:.2f}")
+    logging.info(f"预测价格变化: {predicted_change:.2f}")
+    logging.info(f"RSI (5分钟): {rsi_5m.iloc[-1]:.2f}")
+    logging.info(f"RSI (15分钟): {rsi_15m.iloc[-1]:.2f}")
+    logging.info(f"RSI (30分钟): {rsi_30m.iloc[-1]:.2f}")
+    logging.info(f"RSI 平均值: {rsi_average:.2f}")
+    logging.info(f"买入阈值: {buy_threshold:.2f}")
+    logging.info(f"卖出阈值: {sell_threshold:.2f}")
+
+    # 更新最新的预测和阈值信息
+    update_latest_prediction_info(current_time, current_price, predicted_change, rsi_5m, rsi_15m, rsi_30m, rsi_average, buy_threshold, sell_threshold)
+
+# 在 run_strategy 函数中调用 log_trade_info 而不是直接记录日志
 def run_strategy():
    
     logging.info("开始运行策略...")
@@ -413,15 +512,7 @@ def run_strategy():
         buy_threshold, sell_threshold = dynamic_threshold(predicted_change, 30, 70)
         
         # 记录详细的交易信息
-        logging.info(f"当前时间: {current_time}")
-        logging.info(f"当前价格: {current_price:.2f}")
-        logging.info(f"预测价格变化: {predicted_change:.2f}")
-        logging.info(f"RSI (5分钟): {rsi_5m.iloc[-1]:.2f}")
-        logging.info(f"RSI (15分钟): {rsi_15m.iloc[-1]:.2f}")
-        logging.info(f"RSI (30分钟): {rsi_30m.iloc[-1]:.2f}")
-        logging.info(f"RSI 平均值: {rsi_average:.2f}")
-        logging.info(f"买入阈值: {buy_threshold:.2f}")
-        logging.info(f"卖出阈值: {sell_threshold:.2f}")
+        log_trade_info(current_time, current_price, predicted_change, rsi_5m, rsi_15m, rsi_30m, rsi_average, buy_threshold, sell_threshold)
         
         # 交易逻辑
         if (rsi_5m.iloc[-1] < buy_threshold and rsi_15m.iloc[-1] < buy_threshold and 
@@ -448,6 +539,63 @@ def run_strategy():
         
         else:
             logging.info("当前不满足交易条件，继续观察")
+            
+async def start(update: Update, context: CallbackContext) -> None:
+    """处理 /start 命令"""
+    await update.message.reply_text('欢迎使用交易机器人！')
+
+async def account(update: Update, context: CallbackContext) -> None:
+    """处理 /account 命令"""
+    account_info = client.get_account()
+    balances = account_info['balances']
+    message = "账户余额:\n"
+    for balance in balances:
+        asset = balance['asset']
+        free = balance['free']
+        locked = balance['locked']
+        message += f"{asset}: 可用余额 {free}, 冻结余额 {locked}\n"
+    await update.message.reply_text(message)
+
+async def open_orders(update: Update, context: CallbackContext) -> None:
+    """处理 /open_orders 命令"""
+    orders = client.get_open_orders()
+    if orders:
+        message = "当前未完成订单:\n"
+        for order in orders:
+            message += f"订单ID: {order['orderId']}, 交易对: {order['symbol']}, 数量: {order['origQty']}, 价格: {order['price']}, 状态: {order['status']}\n"
+    else:
+        message = "没有未完成的订单。"
+    await update.message.reply_text(message)
+
+async def order_history(update: Update, context: CallbackContext) -> None:
+    """处理 /order_history 命令"""
+    orders = view_order_history(client, "BTCUSDT")
+    if orders:
+        message = "订单历史记录:\n"
+        for order in orders:
+            message += f"订单ID: {order['orderId']}, 交易对: {order['symbol']}, 价格: {order['price']}, 数量: {order['origQty']}, 状态: {order['status']}, 类型: {order['type']}, 时间: {order['time']}\n"
+    else:
+        message = "没有订单历史记录。"
+    await update.message.reply_text(message)
+
+async def latest_prediction(update: Update, context: CallbackContext) -> None:
+    """处理 /latest_prediction 命令"""
+    if latest_prediction_info:
+        message = (
+            f"最新预测信息:\n"
+            f"当前时间: {latest_prediction_info['current_time']}\n"
+            f"当前价格: {latest_prediction_info['current_price']:.2f}\n"
+            f"预测价格变化: {latest_prediction_info['predicted_change']:.2f}\n"
+            f"RSI (5分钟): {latest_prediction_info['rsi_5m'].iloc[-1]:.2f}\n"
+            f"RSI (15分钟): {latest_prediction_info['rsi_15m'].iloc[-1]:.2f}\n"
+            f"RSI (30分钟): {latest_prediction_info['rsi_30m'].iloc[-1]:.2f}\n"
+            f"RSI 平均值: {latest_prediction_info['rsi_average']:.2f}\n"
+            f"买入阈值: {latest_prediction_info['buy_threshold']:.2f}\n"
+            f"卖出阈值: {latest_prediction_info['sell_threshold']:.2f}"
+        )
+    else:
+        message = "没有最新的预测信息。"
+    await update.message.reply_text(message)
 
 def calculate_rsi(data, period=14):
     """计算RSI"""
@@ -477,5 +625,21 @@ def dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold)
         logging.info(f"买入阈值: {buy_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor*weight:.2f}")
         logging.info(f"卖出阈值: {sell_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor:.2f}")
     return buy_threshold, sell_threshold
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackContext
+def main():
+    """启动Telegram机器人"""
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-run_strategy()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("account", account))
+    application.add_handler(CommandHandler("open_orders", open_orders))
+    application.add_handler(CommandHandler("order_history", order_history))
+    application.add_handler(CommandHandler("latest_prediction", latest_prediction))  # 添加新的命令处理程序
+
+    application.run_polling()
+if __name__ == '__main__':
+    # 创建并启动一个线程来运行交易策略
+    strategy_thread = threading.Thread(target=run_strategy)
+    strategy_thread.start()
+
+    main()

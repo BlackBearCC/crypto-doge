@@ -239,7 +239,7 @@ if __name__ == '__main__':
         combined_df = read_and_combine_csv(dir_path)
         print(f"{timeframe} 数据点数量: {len(combined_df)}")
         todate = datetime.datetime.now()
-        fromdate = todate - datetime.timedelta(days=240)
+        fromdate = todate - datetime.timedelta(days=30)
         data = bt.feeds.PandasData(dataname=combined_df, fromdate=fromdate, todate=todate)
 
         if timeframe == '5m':
@@ -297,6 +297,7 @@ if __name__ == '__main__':
     print(f"最大单笔盈利: {trade_analyzer.won.pnl.max:.2f}")
     print(f"最大单笔亏损: {trade_analyzer.lost.pnl.max:.2f}")
     print(f"胜率: {(trade_analyzer.won.total / trade_analyzer.total.total) * 100:.2f}%")
+    print(trade_analyzer)
 
     plt.rcParams['path.simplify'] = True
     plt.rcParams['path.simplify_threshold'] = 1.0
