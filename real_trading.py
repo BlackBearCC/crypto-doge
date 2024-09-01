@@ -254,12 +254,14 @@ def get_realtime_data(client, symbol, interval='5m', lookback='3000'):
     return df
 
 
-def predict_future(last_data, modelnn, minmax, timestamp, future_hours=14):
-    """预测未来价格"""
+def predict_future(data_1h, modelnn, minmax, timestamp, future_hours=14):
+    """预测未来价格，使用1小时数据"""
+    # 获取最近的timestamp个1小时数据点
+    last_data = data_1h['close'].values[-timestamp:]
+    
     future_predictions = []
-    close_price = last_data[-timestamp:]
-    minmax.fit(np.array(close_price).reshape(-1, 1))
-    close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
+    minmax.fit(last_data.reshape(-1, 1))
+    close_price_scaled = minmax.transform(last_data.reshape(-1, 1)).flatten()
 
     for _ in range(future_hours):
         input_data = np.column_stack((np.zeros(timestamp),
@@ -271,8 +273,7 @@ def predict_future(last_data, modelnn, minmax, timestamp, future_hours=14):
         predicted_close_price = minmax.inverse_transform([[predicted_close_price_scaled]])[0, 0]
         future_predictions.append(predicted_close_price)
 
-        close_price = np.append(close_price[1:], predicted_close_price)
-        close_price_scaled = minmax.transform(np.array(close_price).reshape(-1, 1)).flatten()
+        close_price_scaled = np.append(close_price_scaled[1:], predicted_close_price_scaled)
 
     return future_predictions
 
@@ -344,37 +345,75 @@ def wait_until_next_hour():
     sleep_time = (next_hour - now).total_seconds()
     logging.info(f"等待 {sleep_time} 秒，直到下一个整点 {next_hour.strftime('%Y-%m-%d %H:%M:%S')}")
     time.sleep(sleep_time)
+def wait_until_next_5min():
+    """等待直到下一个5分钟整点"""
+    now = datetime.now()
+    next_5min = now + timedelta(minutes=5 - now.minute % 5, seconds=-now.second, microseconds=-now.microsecond)
+    sleep_time = (next_5min - now).total_seconds()
+    logging.info(f"等待 {sleep_time:.2f} 秒，直到下一个5分钟整点 {next_5min.strftime('%Y-%m-%d %H:%M:%S')}")
+    time.sleep(sleep_time)
+def wait_until_next_hour():
+    """等待直到下一个整点小时"""
+    now = datetime.now()
+    next_hour = (now + timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
+    sleep_time = (next_hour - now).total_seconds()
+    logging.info(f"等待 {sleep_time} 秒，直到下一个整点 {next_hour.strftime('%Y-%m-%d %H:%M:%S')}")
+    time.sleep(sleep_time)
 def run_strategy():
    
     logging.info("开始运行策略...")
     # 获取实时数据
     df = get_realtime_data(client, symbol)
     data_history = df.reset_index().to_dict('records')  # 使用 reset_index 保留 'open_time'
-    logging.info("获取实时数据成功:" + str(data_history))
+    # logging.info("获取实时数据成功:" + str(data_history))
+    last_prediction_time = None
+    predicted_change = 0
 
     while True:
+        # 等待到下一个5分钟整点
+        wait_until_next_5min()
+        
+        current_time = datetime.now()
+        
         # 获取实时数据
-        df = get_realtime_data(client, symbol)
+        df_5m = get_realtime_data(client, symbol, interval='5m')
+        df_15m = get_realtime_data(client, symbol, interval='15m')
+        df_30m = get_realtime_data(client, symbol, interval='30m')
+        df_1h = get_realtime_data(client, symbol, interval='1h')
         
-        # 进行未来指定窗口的预测
-        future_prices = predict_future(df['close'].values, modelnn, minmax, timestamp, future_hours=trend_window)
-        
+        # 检查是否需要进行新的预测（每整点小时一次）
+        if last_prediction_time is None or current_time.minute == 0:
+            future_prices = predict_future(df_1h, modelnn, minmax, timestamp, future_hours=trend_window)
+            predicted_change = future_prices[-1] - df_1h['close'].iloc[-1]
+            last_prediction_time = current_time
+            logging.info(f"新的预测完成: 预测变化 = {predicted_change:.2f}")
+            
+            # 如果不是整点，等待到下一个整点
+            if current_time.minute != 0:
+                wait_until_next_hour()
+                current_time = datetime.now()
+                # 重新获取1小时数据
+                df_1h = get_realtime_data(client, symbol, interval='1h')
+                future_prices = predict_future(df_1h, modelnn, minmax, timestamp, future_hours=trend_window)
+                predicted_change = future_prices[-1] - df_1h['close'].iloc[-1]
+                last_prediction_time = current_time
+                logging.info(f"整点新的预测完成: 预测变化 = {predicted_change:.2f}")
+
         # 获取最近的收盘价
-        current_price = df['close'].iloc[-1]
+        current_price = df_5m['close'].iloc[-1]
         
-        # 计算RSI (这里需要添加RSI计算逻辑)
-        rsi_5m = calculate_rsi(df, period=14)  # 假设使用14期RSI
-        rsi_15m = calculate_rsi(df.resample('15T').last(), period=14)
-        rsi_30m = calculate_rsi(df.resample('30T').last(), period=14)
+        # 计算RSI
+        rsi_5m = calculate_rsi(df_5m, period=14)
+        rsi_15m = calculate_rsi(df_15m, period=14)
+        rsi_30m = calculate_rsi(df_30m, period=14)
         
         rsi_average = (rsi_5m.iloc[-1] + rsi_15m.iloc[-1] + rsi_30m.iloc[-1]) / 3
         
         # 动态阈值计算
-        predicted_change = future_prices[-1] - current_price
         buy_threshold, sell_threshold = dynamic_threshold(predicted_change, 30, 70)
         
         # 记录详细的交易信息
-        logging.info(f"当前时间: {datetime.now()}")
+        logging.info(f"当前时间: {current_time}")
         logging.info(f"当前价格: {current_price:.2f}")
         logging.info(f"预测价格变化: {predicted_change:.2f}")
         logging.info(f"RSI (5分钟): {rsi_5m.iloc[-1]:.2f}")
@@ -409,10 +448,6 @@ def run_strategy():
         
         else:
             logging.info("当前不满足交易条件，继续观察")
-        
-        # 等待一段时间再进行下一次检查
-        logging.info("等待5分钟进行下一次检查...")
-        time.sleep(300)  # 每5分钟检查一次
 
 def calculate_rsi(data, period=14):
     """计算RSI"""
@@ -437,8 +472,8 @@ def dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold)
         logging.info(f"买入阈值: {buy_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor:.2f}")
         logging.info(f"卖出阈值: {sell_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor*weight:.2f}")
     else:
-        buy_threshold = base_buy_threshold - adjustment_factor * normalized_predicted_change * weight
-        sell_threshold = base_sell_threshold - adjustment_factor * normalized_predicted_change
+        buy_threshold = base_buy_threshold + adjustment_factor * normalized_predicted_change * weight
+        sell_threshold = base_sell_threshold + adjustment_factor * normalized_predicted_change
         logging.info(f"买入阈值: {buy_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor*weight:.2f}")
         logging.info(f"卖出阈值: {sell_threshold:.2f},模型加权：{normalized_predicted_change*adjustment_factor:.2f}")
     return buy_threshold, sell_threshold

@@ -3,12 +3,14 @@ import math
 import numpy as np
 import pandas as pd
 import backtrader as bt
-from backtrader import TimeFrame
-import backtrader.analyzers as btanalyzers
+
+
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
 from pathlib import Path
 import matplotlib.pyplot as plt
+import backtrader.analyzers as btanalyzers
+
 
 
 def read_and_combine_csv(directory):
@@ -109,6 +111,7 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
             take_profit_price = current_price + self.atr[0] * self.params.atr_multiplier
             self.sell(exectype=bt.Order.Stop, price=stop_price, size=size, parent=buy_order)
             self.sell(exectype=bt.Order.Limit, price=take_profit_price, size=size, parent=buy_order)
+            print(f"预测变化: {self.predicted_change},买入阈值: {buy_threshold},卖出阈值: {sell_threshold}")
             print(
                 f"时间: {current_time} 买入信号触发 - 订单号={buy_order.ref}, 价格: {current_price:.2f}, 止盈: {take_profit_price:.2f}, 止损: {stop_price:.2f}, 数量: {size:.4f}, 账户资金: {self.broker.getvalue():.2f}")
         elif (self.rsi_5m[0] > sell_threshold and self.rsi_15m[0] > sell_threshold and self.rsi_30m[
@@ -123,24 +126,25 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
             take_profit_price = current_price - self.atr[0] * self.params.atr_multiplier
             self.buy(exectype=bt.Order.Stop, price=stop_price, size=size, parent=sell_order)
             self.buy(exectype=bt.Order.Limit, price=take_profit_price, size=size, parent=sell_order)
+            print(f"预测变化: {self.predicted_change},买入阈值: {buy_threshold},卖出阈值: {sell_threshold}")
             print(
                 f"时间: {current_time} 卖出信号触发 - 订单号={sell_order.ref}, 价格: {current_price:.2f}, 止盈: {take_profit_price:.2f}, 止损: {stop_price:.2f}, 数量: {size:.4f}, 账户资金: {self.broker.getvalue():.2f}")
 
-    # def notify_order(self, order):
-    # if order.status in [order.Submitted, order.Accepted]:
-    #     # 订单已提交或已接受，通常这些状态不会引起实际的订单变动
-    #     return
+    def notify_order(self, order):
+        if order.status in [order.Submitted, order.Accepted]:
+            # 订单已提交或已接受，通常这些状态不会引起实际的订单变动
+            return
 
-    # 检查订单是否完成
-    # if order.status == order.Completed:
-    #     if order.isbuy():
-    #         print(f"买入订单完成:订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 手续费={order.executed.comm:.2f}")
-    #     elif order.issell():
-    #         print(f"卖出订单完成:订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 手续费={order.executed.comm:.2f}")
+        # 检查订单是否完成
+        # if order.status == order.Completed:
+        #     if order.isbuy():
+        #         print(f"买入订单完成:订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 手续费={order.executed.comm:.2f}")
+        #     elif order.issell():
+        #         print(f"卖出订单完成:订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 手续费={order.executed.comm:.2f}")
 
-    # # 检查是否为止损订单
-    # if order.exectype == bt.Order.Stop:
-    #     print(f"止损订单触发: 订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 盈利={order.executed.pnl:.2f}")
+        # 检查是否为止损订单
+        if order.exectype == bt.Order.Stop:
+            print(f"止损订单触发: 订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 盈利={order.executed.pnl:.2f}")
 
     def predict_direction(self):
         # print("开始预测方向")
@@ -183,10 +187,10 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         adjustment_factor = 50
         if normalized_predicted_change > 0:
             buy_threshold = base_buy_threshold + adjustment_factor * normalized_predicted_change
-            sell_threshold = base_sell_threshold + adjustment_factor * normalized_predicted_change*0.6
+            sell_threshold = base_sell_threshold + adjustment_factor * normalized_predicted_change
 
         else:
-            buy_threshold = base_buy_threshold - adjustment_factor * normalized_predicted_change*0.6
+            buy_threshold = base_buy_threshold - adjustment_factor * normalized_predicted_change
             sell_threshold = base_sell_threshold - adjustment_factor * normalized_predicted_change
 
         return buy_threshold, sell_threshold
@@ -235,7 +239,7 @@ if __name__ == '__main__':
         combined_df = read_and_combine_csv(dir_path)
         print(f"{timeframe} 数据点数量: {len(combined_df)}")
         todate = datetime.datetime.now()
-        fromdate = todate - datetime.timedelta(days=30)
+        fromdate = todate - datetime.timedelta(days=240)
         data = bt.feeds.PandasData(dataname=combined_df, fromdate=fromdate, todate=todate)
 
         if timeframe == '5m':
@@ -254,7 +258,7 @@ if __name__ == '__main__':
     data_1h.plotinfo.subplot = True
     cerebro.broker.setcash(10000)
     cerebro.addstrategy(MultiTimeFrameRSIStrategy)
-    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name='sharpe_ratio', timeframe=TimeFrame.Minutes, compression=60,
+    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name='sharpe_ratio', timeframe=bt.TimeFrame.Minutes, compression=60,
                         annualize=True)
     cerebro.addanalyzer(btanalyzers.AnnualReturn, _name='annual_returns')
     cerebro.addanalyzer(btanalyzers.Returns, _name='returns', fund=False)
