@@ -124,7 +124,7 @@ api_secret = "2BLZojVtSzDfyVgE1TW6U6MCSxDoDh5pnNZnz0BohEOGc7duHsT7mob2jf42ksOA"
 client = Client(api_key, api_secret, testnet=True)
 
 # 加载模型
-model_path = 'quant_model.h5'
+model_path = 'crypto-doge/quant_model.h5'
 modelnn = tf.keras.models.load_model(model_path)
 logging.info("模型已加载: %s", model_path)
 
@@ -154,7 +154,7 @@ valleys_all = []
 future_datetimes_all = []
 processed_trades = set()
 
-atr = 14
+
 
 symbol = "BTCUSDT"  # 交易对
 
@@ -298,7 +298,7 @@ def predict_future(data_1h, modelnn, minmax, timestamp, future_hours=14):
 def round_step_size(quantity, step_size):
     """将数量四舍五入到正确的精度"""
     return round(quantity - (quantity % step_size), 8)
-def execute_trade(client, symbol, side, quantity, price=None, type='MARKET'):
+def execute_trade(client, symbol, side, quantity, price=None, type='MARKET', atr=None, atr_multiplier=2):
     """执行交易"""
     try:
         # 将数量四舍五入到正确的精度
@@ -324,51 +324,53 @@ def execute_trade(client, symbol, side, quantity, price=None, type='MARKET'):
         else:
             raise ValueError("Invalid order type or missing price for LIMIT order.")
 
-            # 记录订单详细信息
+        # 记录订单详细信息
         log_order_details(order)
-              # 设置止盈止损
-        if side == 'BUY':
-            stop_price = price - atr * atr_multiplier * 0.5
-            take_profit_price = price + atr * atr_multiplier
-            client.create_order(
-                symbol=symbol,
-                side='SELL',
-                type='STOP_LOSS_LIMIT',
-                timeInForce='GTC',
-                quantity=quantity,
-                stopPrice=str(stop_price),
-                price=str(stop_price)
-            )
-            client.create_order(
-                symbol=symbol,
-                side='SELL',
-                type='TAKE_PROFIT_LIMIT',
-                timeInForce='GTC',
-                quantity=quantity,
-                stopPrice=str(take_profit_price),
-                price=str(take_profit_price)
-            )
-        elif side == 'SELL':
-            stop_price = price + atr * atr_multiplier * 0.5
-            take_profit_price = price - atr * atr_multiplier
-            client.create_order(
-                symbol=symbol,
-                side='BUY',
-                type='STOP_LOSS_LIMIT',
-                timeInForce='GTC',
-                quantity=quantity,
-                stopPrice=str(stop_price),
-                price=str(stop_price)
-            )
-            client.create_order(
-                symbol=symbol,
-                side='BUY',
-                type='TAKE_PROFIT_LIMIT',
-                timeInForce='GTC',
-                quantity=quantity,
-                stopPrice=str(take_profit_price),
-                price=str(take_profit_price)
-            )
+
+        # 设置止盈止损
+        if atr is not None:
+            if side == 'BUY':
+                stop_price = price - atr * atr_multiplier * 0.5
+                take_profit_price = price + atr * atr_multiplier
+                client.create_order(
+                    symbol=symbol,
+                    side='SELL',
+                    type='STOP_LOSS_LIMIT',
+                    timeInForce='GTC',
+                    quantity=quantity,
+                    stopPrice=str(stop_price),
+                    price=str(stop_price)
+                )
+                client.create_order(
+                    symbol=symbol,
+                    side='SELL',
+                    type='TAKE_PROFIT_LIMIT',
+                    timeInForce='GTC',
+                    quantity=quantity,
+                    stopPrice=str(take_profit_price),
+                    price=str(take_profit_price)
+                )
+            elif side == 'SELL':
+                stop_price = price + atr * atr_multiplier * 0.5
+                take_profit_price = price - atr * atr_multiplier
+                client.create_order(
+                    symbol=symbol,
+                    side='BUY',
+                    type='STOP_LOSS_LIMIT',
+                    timeInForce='GTC',
+                    quantity=quantity,
+                    stopPrice=str(stop_price),
+                    price=str(stop_price)
+                )
+                client.create_order(
+                    symbol=symbol,
+                    side='BUY',
+                    type='TAKE_PROFIT_LIMIT',
+                    timeInForce='GTC',
+                    quantity=quantity,
+                    stopPrice=str(take_profit_price),
+                    price=str(take_profit_price)
+                )
         
         # 发送交易信息到Telegram
         send_telegram_message(f"交易执行: {side} {quantity} {symbol} @ {price}")
@@ -401,13 +403,7 @@ def plot_predictions(historical_datetimes, historical_prices, future_datetimes, 
     plt.legend()
     plt.show()
 
-def wait_until_next_hour():
-    """等待直到下一个整点,该函数计算当前时间与下一个整点的时间差，并休眠这段时间，确保代码在整点运行。"""
-    now = datetime.now()
-    next_hour = (now + timedelta(hours=1)).replace(minute=1, second=0, microsecond=0)
-    sleep_time = (next_hour - now).total_seconds()
-    logging.info(f"等待 {sleep_time} 秒，直到下一个整点 {next_hour.strftime('%Y-%m-%d %H:%M:%S')}")
-    time.sleep(sleep_time)
+
 def wait_until_next_5min():
     """等待直到下一个5分钟整点"""
     now = datetime.now()
@@ -459,47 +455,37 @@ def log_trade_info(current_time, current_price, predicted_change, rsi_5m, rsi_15
 
 # 在 run_strategy 函数中调用 log_trade_info 而不是直接记录日志
 def run_strategy():
-   
     logging.info("开始运行策略...")
     # 获取实时数据
     df = get_realtime_data(client, symbol)
     data_history = df.reset_index().to_dict('records')  # 使用 reset_index 保留 'open_time'
-    # logging.info("获取实时数据成功:" + str(data_history))
+    
     last_prediction_time = None
     predicted_change = 0
 
     while True:
-        # 等待到下一个5分钟整点
-        wait_until_next_5min()
+
         
         current_time = datetime.now()
-        
-        # 获取实时数据
-        df_5m = get_realtime_data(client, symbol, interval='5m')
-        df_15m = get_realtime_data(client, symbol, interval='15m')
-        df_30m = get_realtime_data(client, symbol, interval='30m')
-        df_1h = get_realtime_data(client, symbol, interval='1h')
-        
-        # 检查是否需要进行新的预测（每整点小时一次）
-        if last_prediction_time is None or current_time.minute == 0:
+                # 判断是否为整点时间
+        if last_prediction_time is None or (current_time.minute == 0 and current_time.second < 5):
+            # 获取1小时数据并进行预测
+            df_1h = get_realtime_data(client, symbol, interval='1h')
             future_prices = predict_future(df_1h, modelnn, minmax, timestamp, future_hours=trend_window)
             predicted_change = future_prices[-1] - df_1h['close'].iloc[-1]
             last_prediction_time = current_time
-            logging.info(f"新的预测完成: 预测变化 = {predicted_change:.2f}")
-            
-            # 如果不是整点，等待到下一个整点
-            if current_time.minute != 0:
-                wait_until_next_hour()
-                current_time = datetime.now()
-                # 重新获取1小时数据
-                df_1h = get_realtime_data(client, symbol, interval='1h')
-                future_prices = predict_future(df_1h, modelnn, minmax, timestamp, future_hours=trend_window)
-                predicted_change = future_prices[-1] - df_1h['close'].iloc[-1]
-                last_prediction_time = current_time
-                logging.info(f"整点新的预测完成: 预测变化 = {predicted_change:.2f}")
-
+            logging.info(f"整点新的预测完成: 预测变化 = {predicted_change:.2f}")
+         # 获取5分钟、15分钟、30分钟的数据进行实时判断
+        df_5m = get_realtime_data(client, symbol, interval='5m')
+        df_15m = get_realtime_data(client, symbol, interval='15m')
+        df_30m = get_realtime_data(client, symbol, interval='30m')
+        
+        # 计算ATR基于1小时数据
+        atr = calculate_atr(df_1h, period=14)
+        
         # 获取最近的收盘价
         current_price = df_5m['close'].iloc[-1]
+        logging.info(f"当前价格: {current_price:.2f}")
         
         # 计算RSI
         rsi_5m = calculate_rsi(df_5m, period=14)
@@ -519,7 +505,7 @@ def run_strategy():
             rsi_30m.iloc[-1] < buy_threshold and rsi_average < buy_threshold):
             # 执行买入
             quantity = buy_amount / current_price
-            order = execute_trade(client, symbol, "BUY", quantity)
+            order = execute_trade(client, symbol, "BUY", quantity, atr=atr.iloc[-1], atr_multiplier=atr_multiplier)
             if order:
                 logging.info(f"买入信号触发 - 价格: {current_price:.2f}, 数量: {quantity:.4f}")
                 logging.info(f"买入订单详情: {order}")
@@ -530,7 +516,7 @@ def run_strategy():
               rsi_30m.iloc[-1] > sell_threshold and rsi_average > sell_threshold):
             # 执行卖出
             quantity = max_sell
-            order = execute_trade(client, symbol, "SELL", quantity)
+            order = execute_trade(client, symbol, "SELL", quantity, atr=atr.iloc[-1], atr_multiplier=atr_multiplier)
             if order:
                 logging.info(f"卖出信号触发 - 价格: {current_price:.2f}, 数量: {quantity:.4f}")
                 logging.info(f"卖出订单详情: {order}")
@@ -539,7 +525,8 @@ def run_strategy():
         
         else:
             logging.info("当前不满足交易条件，继续观察")
-            
+                # 等待到下一个5分钟整点
+        wait_until_next_5min()    
 async def start(update: Update, context: CallbackContext) -> None:
     """处理 /start 命令"""
     await update.message.reply_text('欢迎使用交易机器人！')
@@ -604,6 +591,19 @@ def calculate_rsi(data, period=14):
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
+def calculate_atr(data, period=14):
+    """
+    计算给定数据的平均真实波动范围（ATR）。
+    :param data: DataFrame, 必须包含列 'high', 'low', 'close'
+    :param period: int, ATR计算周期，默认是14
+    :return: Series, ATR值
+    """
+    high_low = data['high'] - data['low']
+    high_close = np.abs(data['high'] - data['close'].shift())
+    low_close = np.abs(data['low'] - data['close'].shift())
+    true_range = np.maximum(high_low, high_close, low_close)
+    atr = true_range.rolling(window=period).mean()
+    return atr
 
 def normalize(value, min_value, max_value):
     """归一化函数"""
@@ -613,7 +613,7 @@ def dynamic_threshold(predicted_change, base_buy_threshold, base_sell_threshold)
     """动态调整RSI阈值"""
     normalized_predicted_change = normalize(predicted_change, -2000, 2000)
     adjustment_factor = 50
-    weight = 0.6
+    weight = 1
     if normalized_predicted_change > 0:
         buy_threshold = base_buy_threshold + adjustment_factor * normalized_predicted_change
         sell_threshold = base_sell_threshold + adjustment_factor * normalized_predicted_change * weight
