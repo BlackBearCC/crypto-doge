@@ -36,9 +36,9 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         ('rsi1_length', 14),
         ('rsi2_length', 14),
         ('rsi3_length', 14),
-        ('base_buy_threshold', 30.0),
-        ('base_sell_threshold', 70.0),
-        ('atr_multiplier', 15),
+        ('base_buy_threshold', 25.0),
+        ('base_sell_threshold', 65.0),
+        ('atr_multiplier', 3),
         ('atr_length', 14),
         ('cooldown_period', 30),
         ('initial_cash', 10000),
@@ -46,15 +46,15 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         ('position_size', 500),
         ('min_predicted_change', -2000),
         ('max_predicted_change', 2000),
-        ('model_path', 'quant_model.h5'),
-        ('timestamp', 5),  # 假设模型需要5个小时的数据
+        ('model_path', 'crypto-doge/quant_model.h5'),
+        ('timestamp', 24),  # 假设模型需要5个小时的数据
     )
 
     def __init__(self):
         self.rsi_5m = bt.indicators.RSI(self.data0.close, period=self.params.rsi1_length)
         self.rsi_15m = bt.indicators.RSI(self.data1.close, period=self.params.rsi2_length)
         self.rsi_30m = bt.indicators.RSI(self.data2.close, period=self.params.rsi3_length)
-        self.atr = bt.indicators.ATR(self.data1, period=self.params.atr_length)
+        self.atr = bt.indicators.ATR(self.data3, period=self.params.atr_length)
 
         self.modelnn = tf.keras.models.load_model(self.params.model_path)
         self.minmax = MinMaxScaler()
@@ -70,8 +70,12 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
         self.predicted_change = 0
 
         self.trades = []  # 用于存储交易信息
+        self.active_orders = {}  # 用于跟踪活跃订单
+        self.long_position = 0  # 用于跟踪多头头寸
+        self.short_position = 0  # 用于跟踪空头头寸
     def next(self):
         current_time = self.data0.datetime.datetime(0)
+
         # print(f"当前时间: {current_time}")
         # print(f"5分钟收盘价: {self.data0.close[0]}")
         # print(f"15分钟收盘价: {self.data1.close[0]}")
@@ -99,53 +103,84 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
                                                                base_sell_threshold)
         # print(f"买入阈值: {buy_threshold:.2f}")
         # print(f"卖出阈值: {sell_threshold:.2f}")
-
+                # 当前的ATR值
+        current_atr = self.atr[0]
+                # 计算动态波动性阈值
+        dynamic_atr_threshold = 1000
+        # 检查当前波动性是否超过动态阈值
+        # if current_atr > dynamic_atr_threshold:
+        #     print(f"当前ATR {current_atr:.2f} 超过动态阈值 {dynamic_atr_threshold:.2f}，暂停交易")
+        #     return  # 波动性过高，退出函数，不进行交易
+        if self.data0.datetime.datetime(0).minute == 0:  # 每小时输出一次
+            self.print_position_status()
         if (self.rsi_5m[0] < buy_threshold and self.rsi_15m[0] < buy_threshold and self.rsi_30m[0] < buy_threshold and
-                rsi_average < buy_threshold and self.buy_cooldown == 0):
-            if self.position.size < 0:
-                self.close()
+                rsi_average < buy_threshold and self.buy_cooldown == 0 and self.predicted_change > 0):
+            # if self.position.size < 0:
+            #     self.close()
+
             buy_order = self.buy(size=size)  # 这里保存买入订单
             self.buy_cooldown = self.params.cooldown_period
 
-            stop_price = current_price - self.atr[0] * self.params.atr_multiplier * 0.5
+            stop_price = current_price - self.atr[0] * self.params.atr_multiplier 
             take_profit_price = current_price + self.atr[0] * self.params.atr_multiplier
-            self.sell(exectype=bt.Order.Stop, price=stop_price, size=size, parent=buy_order)
-            self.sell(exectype=bt.Order.Limit, price=take_profit_price, size=size, parent=buy_order)
-            print(f"预测变化: {self.predicted_change},买入阈值: {buy_threshold},卖出阈值: {sell_threshold}")
+            stop_loss = self.sell(exectype=bt.Order.Stop, price=stop_price, size=size, parent=buy_order)  # 独立的止损订单
+            take_profit = self.sell(exectype=bt.Order.Limit, price=take_profit_price, size=size, parent=buy_order)  # 独立的止盈订单
+            self.active_orders[buy_order.ref] = {
+                'type': 'buy',
+                'size': size,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit
+            }
+            print(f"预测变化: {self.predicted_change},买入阈值: {buy_threshold},卖出阈值: {sell_threshold}，平均波动: {self.atr[0]}")
             print(
                 f"时间: {current_time} 买入信号触发 - 订单号={buy_order.ref}, 价格: {current_price:.2f}, 止盈: {take_profit_price:.2f}, 止损: {stop_price:.2f}, 数量: {size:.4f}, 账户资金: {self.broker.getvalue():.2f}")
-        elif (self.rsi_5m[0] > sell_threshold and self.rsi_15m[0] > sell_threshold and self.rsi_30m[
-            0] > sell_threshold and
-              rsi_average > sell_threshold and self.sell_cooldown == 0):
-            if self.position.size > 0:
-                self.close()
+        elif (self.rsi_5m[0] > sell_threshold and self.rsi_15m[0] > sell_threshold and self.rsi_30m[0] > sell_threshold and
+              rsi_average > sell_threshold and self.sell_cooldown == 0 and self.predicted_change < 0):
+            # if self.position.size > 0:
+            #     self.close()
+
             sell_order = self.sell(size=size)  # 这里保存卖出订单
+
             self.sell_cooldown = self.params.cooldown_period
 
-            stop_price = current_price + self.atr[0] * self.params.atr_multiplier * 0.5
+            stop_price = current_price + self.atr[0] * self.params.atr_multiplier 
             take_profit_price = current_price - self.atr[0] * self.params.atr_multiplier
-            self.buy(exectype=bt.Order.Stop, price=stop_price, size=size, parent=sell_order)
-            self.buy(exectype=bt.Order.Limit, price=take_profit_price, size=size, parent=sell_order)
-            print(f"预测变化: {self.predicted_change},买入阈值: {buy_threshold},卖出阈值: {sell_threshold}")
+            stop_loss = self.buy(exectype=bt.Order.Stop, price=stop_price, size=size,parent=sell_order)  # 独立的止损订单
+            take_profit = self.buy(exectype=bt.Order.Limit, price=take_profit_price, size=size,parent=sell_order)  # 独立的止盈订单
+            self.active_orders[sell_order.ref] = {
+                'type': 'sell',
+                'size': size,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit
+            }
+            print(f"预测变化: {self.predicted_change},买入阈值: {buy_threshold},卖出阈值: {sell_threshold}，平均波动: {self.atr[0]}")
             print(
                 f"时间: {current_time} 卖出信号触发 - 订单号={sell_order.ref}, 价格: {current_price:.2f}, 止盈: {take_profit_price:.2f}, 止损: {stop_price:.2f}, 数量: {size:.4f}, 账户资金: {self.broker.getvalue():.2f}")
-
+ 
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
             # 订单已提交或已接受，通常这些状态不会引起实际的订单变动
             return
 
-        # 检查订单是否完成
-        # if order.status == order.Completed:
-        #     if order.isbuy():
-        #         print(f"买入订单完成:订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 手续费={order.executed.comm:.2f}")
-        #     elif order.issell():
-        #         print(f"卖出订单完成:订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 手续费={order.executed.comm:.2f}")
+        if order.status == order.Completed:
+            if order.isbuy():
+                print(f"买入订单完成: 订单号 {order.ref}, 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}")
+            else:
+                print(f"卖出订单完成: 订单号 {order.ref}, 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}")
+            
+            if order.exectype in [bt.Order.Stop, bt.Order.Limit]:
+                print(f"止盈/止损订单触发: 订单号 {order.ref}")
 
-        # 检查是否为止损订单
-        if order.exectype == bt.Order.Stop:
-            print(f"止损订单触发: 订单号 {order.ref} 价格={order.executed.price:.2f}, 数量={order.executed.size:.4f}, 盈利={order.executed.pnl:.2f}")
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            print(f"订单 {order.ref} 被取消/拒绝，原因: {order.Status[order.status]}")
 
+    def print_position_status(self):
+        print(f"当前时间: {self.data0.datetime.datetime(0)}")
+        print(f"多头持仓: {self.position.size if self.position.size > 0 else 0}")
+        print(f"空头持仓: {abs(self.position.size) if self.position.size < 0 else 0}")
+        print(f"活跃订单数: {len(self.active_orders)}")
+        print(f"账户价值: {self.broker.getvalue():.2f}")
+        print("---")
     def predict_direction(self):
         # print("开始预测方向")
         if len(self.data3) < self.params.timestamp:
@@ -184,7 +219,7 @@ class MultiTimeFrameRSIStrategy(bt.Strategy):
     def dynamic_threshold(self, predicted_change, base_buy_threshold, base_sell_threshold):
         normalized_predicted_change = self.normalize(predicted_change, self.params.min_predicted_change,
                                                      self.params.max_predicted_change)
-        adjustment_factor = 50
+        adjustment_factor = 20
         if normalized_predicted_change > 0:
             buy_threshold = base_buy_threshold + adjustment_factor * normalized_predicted_change
             sell_threshold = base_sell_threshold + adjustment_factor * normalized_predicted_change
@@ -228,9 +263,9 @@ if __name__ == '__main__':
     cerebro = bt.Cerebro()
 
     directories = {
-        '5m': 'BTCUSDT-5m',
-        '15m': 'BTCUSDT-15m',
-        '30m': 'BTCUSDT-30m'
+        '5m': 'crypto-doge/BTCUSDT-5m',
+        '15m': 'crypto-doge/BTCUSDT-15m',
+        '30m': 'crypto-doge/BTCUSDT-30m'
     }
 
     data_5m = None
@@ -239,7 +274,7 @@ if __name__ == '__main__':
         combined_df = read_and_combine_csv(dir_path)
         print(f"{timeframe} 数据点数量: {len(combined_df)}")
         todate = datetime.datetime.now()
-        fromdate = todate - datetime.timedelta(days=30)
+        fromdate = todate - datetime.timedelta(days=90)
         data = bt.feeds.PandasData(dataname=combined_df, fromdate=fromdate, todate=todate)
 
         if timeframe == '5m':
@@ -302,6 +337,6 @@ if __name__ == '__main__':
     plt.rcParams['path.simplify'] = True
     plt.rcParams['path.simplify_threshold'] = 1.0
     plt.rcParams['agg.path.chunksize'] = 10000
-    cerebro.plot(style='candlestick', barup='black', bardown='white', marker='o', markersize=4, markercolor='orange')
+    # cerebro.plot(style='candlestick', barup='black', bardown='white', marker='o', markersize=4, markercolor='orange')
     # 绘制交易收益柱状图
-    plot_trade_profits(strat.trades)
+    # plot_trade_profits(strat.trades)
